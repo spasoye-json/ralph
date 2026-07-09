@@ -37,7 +37,12 @@ _list() {
 
 case "$cmd" in
   list)    _list "${1:?pr}" ;;
-  count)   _list "${1:?pr}" | grep -c . || true ;;
+  count)
+    # Capture first so an API failure exits non-zero (the caller assumes 1
+    # unresolved thread) instead of the pipeline masking it as a "0" count.
+    out="$(_list "${1:?pr}")"
+    printf '%s' "$out" | grep -c . || true
+    ;;
   resolve)
     gh api graphql -F id="${1:?threadId}" -f query='
       mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){ thread{ isResolved } } }' >/dev/null
