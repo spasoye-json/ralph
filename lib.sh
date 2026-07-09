@@ -39,8 +39,8 @@ RALPH_AFK="${RALPH_AFK:-1}"                     # 1 = fully autonomous (no quali
 RALPH_MAX_ATTEMPTS="${RALPH_MAX_ATTEMPTS:-8}"  # implementer/review/verifier attempts per issue before re-queueing (0 = unlimited = "retry until green")
 RALPH_INFRA_RETRIES="${RALPH_INFRA_RETRIES:-3}" # consecutive /implement crashes (or PR-author failures) tolerated before declaring an infra error
 RALPH_ISSUE_BUDGET="${RALPH_ISSUE_BUDGET:-7200}" # per-issue wall-clock budget in seconds; on hit the issue is RE-QUEUED (not handed back) and a fail outcome reaches the circuit breaker (0 = off)
-# Approved PRs enable CI-gated auto-merge inline at approval time (GitHub merges
-# them server-side when checks pass), so there is no aged human merge window.
+# Approved PRs are un-drafted and left for a HUMAN to merge — Ralph never merges
+# and never enables auto-merge; the merge is the one human checkpoint.
 WORKTREE_ROOT="${WORKTREE_ROOT:-..}"           # where sibling worktrees are created
 AGENT_TIMEOUT="${AGENT_TIMEOUT:-3600}"         # seconds before a single claude -p agent is killed
 
@@ -118,10 +118,10 @@ if [ "$RALPH_TRIM_MCP" = "1" ] && command -v claude >/dev/null 2>&1; then
   fi
 fi
 
-# Marker comment Ralph posts on approval. The auto-merge sweep requires this exact
-# marker (not just "the PR is non-draft") so a human un-drafting a PR, or pushing
-# new commits after approval, can never trip the gated auto-merge. Used both when
-# posting the approval comment and when verifying it (classify_pr / pr_state).
+# Marker comment Ralph posts on approval. The sweeps require this exact marker
+# (not just "the PR is non-draft") so a human un-drafting a PR, or pushing new
+# commits after approval, can never be mistaken for a Ralph approval. Used both
+# when posting the approval comment and when verifying it (classify_pr / pr_state).
 APPROVAL_MARKER="${APPROVAL_MARKER:-Automated code review: APPROVED}"
 
 # Absolute path to this dir (worktree-bound agents can't see the untracked ralph/).
@@ -683,20 +683,20 @@ run_safety_scan() {
 # --- PR Ralph-state mutations (own the full GitHub side-effect) ---------------
 # These two own the writes that drive a PR between classify_pr's states: the
 # approve transition and the hand-back transition. Each is idempotent and trusts
-# PR STATE over gh's exit code (gh exits non-zero in benign cases — e.g. enabling
-# auto-merge from inside a worktree that has the branch checked out).
+# PR STATE over gh's exit code (gh exits non-zero in benign cases).
 
 # approve_pr <pr> <issue_n> <ilog> — the full approve side-effect, idempotent:
 # un-draft (gh pr ready), strip any [HUMAN_LABEL] title prefix, post the
-# $APPROVAL_MARKER comment (the marker classify_pr keys on), drop the WORKING and
-# HUMAN issue labels, and enable CI-gated auto-merge (--auto --squash; GitHub
-# merges server-side once required checks pass — this never merges directly).
+# $APPROVAL_MARKER comment (the marker classify_pr keys on), and drop the WORKING
+# and HUMAN issue labels. It NEVER merges and never enables auto-merge — an
+# approved (non-draft, marker-bearing) PR waits for a human to merge it, the
+# deliberate human checkpoint at the end of the loop.
 # The marker comment is posted ONLY IF one is not already present, so a second
 # invocation on the happy path (review_and_resolve approves, then process-issue.sh
 # step 5 re-approves) is a true no-op — no duplicate comment. Every other step is
 # already idempotent. Always returns 0: every step is best-effort and re-runnable,
-# and the auto-merge enable is re-asserted by maintain_prs, so a benign gh non-zero
-# must not abort the caller. cwd is irrelevant (operates on the PR by url/number).
+# so a benign gh non-zero must not abort the caller. cwd is irrelevant (operates
+# on the PR by url/number).
 approve_pr() {
   local pr_url="$1" n="$2" ilog="$3" cur_title marker_present
   gh pr ready "$pr_url" >>"$ilog" 2>&1 || true                        # un-draft if a prior handback drafted it
@@ -707,11 +707,10 @@ approve_pr() {
   marker_present="$(gh pr view "$pr_url" --json comments \
     -q "[.comments[] | select(.body | startswith(\"$APPROVAL_MARKER\"))] | length" 2>/dev/null || echo 0)"
   if [ "${marker_present:-0}" -eq 0 ] 2>/dev/null; then
-    gh pr comment "$pr_url" --body "$APPROVAL_MARKER — all review threads resolved. Eligible for gated auto-merge." >>"$ilog" 2>&1 || true
+    gh pr comment "$pr_url" --body "$APPROVAL_MARKER — all review threads resolved. Ready for a human to merge." >>"$ilog" 2>&1 || true
   fi
   gh issue edit "$n" --remove-label "$WORKING_LABEL" >/dev/null 2>&1 || true
   gh issue edit "$n" --remove-label "$HUMAN_LABEL" >/dev/null 2>&1 || true
-  gh pr merge "$pr_url" --auto --squash >>"$ilog" 2>&1 || true        # CI-gated; never merges directly
   return 0
 }
 

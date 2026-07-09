@@ -43,11 +43,9 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
 fi
 
 # Maintenance sweep over Ralph's own open PRs (head issue/*), skipping handed-
-# back drafts: resolve master-conflicts (then re-review), hand back approved PRs
-# whose CI is failing, and (idempotently) ensure CI-gated auto-merge is enabled
-# on approved + mergeable PRs. The enable normally happens inline at approval
-# time in process-issue.sh; this sweep is the safety net for a failed enable or a
-# resumed PR. There is no aged human window any more.
+# back drafts: resolve master-conflicts (then re-review) and hand back approved
+# PRs whose CI is failing. Approved + green PRs are left alone — the merge is the
+# human's checkpoint; Ralph never merges and never enables auto-merge.
 maintain_prs() {
   local prs num branch draft mergeable n ci state
   prs="$(gh pr list --state open --json number,headRefName,isDraft,mergeable \
@@ -81,8 +79,8 @@ maintain_prs() {
           continue
         fi
         # Approved + no conflicts, but is CI actually green? CI is an orthogonal
-        # axis to the enum. A persistently-red PR would enable --auto and never
-        # merge, so detect failures and hand back.
+        # axis to the enum. A persistently-red PR would sit unmergeable on the
+        # human's desk, so detect failures and hand back explicitly.
         ci="$(gh pr checks "$num" --json bucket -q '[.[].bucket] | join(",")' 2>/dev/null)" || true
         if printf '%s' "$ci" | grep -q 'fail'; then
           log "  PR #$num approved but CI failing ($ci) — handing back to human"
@@ -90,13 +88,8 @@ maintain_prs() {
           record_metric "$n" ci-fail "" "" "approved + mergeable but required CI failing ($ci)"
           continue
         fi
-        # Approved + green: ensure CI-gated auto-merge is enabled. Idempotent —
-        # process-issue.sh enables it inline at approval; this re-enables it for a
-        # PR whose inline enable failed or that was resumed mid-flight. GitHub
-        # completes the merge server-side once required checks pass.
-        log "  PR #$num approved & green — ensuring CI-gated auto-merge is enabled"
-        gh pr merge "$num" --auto --squash >/dev/null 2>&1 \
-          || log "  PR #$num auto-merge enable failed (re-checked next cycle)"
+        # Approved + green: nothing to do — the merge is the human checkpoint.
+        log "  PR #$num approved & green — awaiting your merge"
         ;;
       *)
         log "  PR #$num state=$state mergeable=$mergeable — leaving alone (human-managed / re-checking)"
@@ -195,7 +188,7 @@ while :; do
   reap_stale_working || log "  reaper errored (continuing)"
   resume_stranded || log "  resume sweep errored (continuing)"
 
-  log "--- Cycle $cycle: maintaining open PRs (conflicts + gated auto-merge) ---"
+  log "--- Cycle $cycle: maintaining open PRs (conflicts + CI health) ---"
   maintain_prs || log "  maintenance sweep errored (continuing)"
 
   mapfile -t batch < <(ready_issues)
@@ -231,23 +224,24 @@ while :; do
   fi
 
   # Terminal condition: exit once nothing is eligible AND nothing is in flight.
-  # "In flight" = open issue/* PRs that are NOT handed-back drafts — i.e. approved
-  # PRs awaiting their CI-gated auto-merge (GitHub completes it server-side after
-  # we exit) and draft PRs still mid-review. A merge that lands unblocks its
-  # dependents, which the next poll picks up; once those drain too, we quit. This
-  # replaces polling forever — Ralph self-terminates when the queue is clear.
+  # "In flight" = draft issue/* PRs still mid-review that are NOT handed-back.
+  # Approved PRs do NOT count — they wait for the human's merge, which can happen
+  # long after the loop exits; blocking exit on them would poll forever. A merge
+  # that lands unblocks its dependents — re-run the loop (or leave it running with
+  # issues still queued) to pick those up. Ralph self-terminates when the queue is
+  # clear and no review is mid-flight.
   inflight="$(gh pr list --state open --json headRefName,isDraft,title \
-      -q '[.[] | select(.headRefName|startswith("issue/")) | select((.isDraft and (.title|startswith("['"$HUMAN_LABEL"']"))) | not)] | length' 2>/dev/null || echo 0)"
+      -q '[.[] | select(.headRefName|startswith("issue/")) | select(.isDraft and ((.title|startswith("['"$HUMAN_LABEL"']")) | not))] | length' 2>/dev/null || echo 0)"
   remaining="$(ready_count)"
   if [ "${remaining:-0}" -eq 0 ] && [ "${inflight:-0}" -eq 0 ]; then
     refresh_base   # land the human on a current master (the last merges happened after the last cycle-start refresh)
-    log "=== Queue drained, no PRs in flight — Ralph loop done (approved PRs auto-merge server-side). ==="
+    log "=== Queue drained, nothing mid-review — Ralph loop done (approved PRs await your merge). ==="
     exit 0
   fi
 
   # Adaptive cadence: reset to the fast floor whenever there was work to do;
-  # otherwise back off geometrically toward the idle ceiling (waiting on in-flight
-  # PRs to go green and merge).
+  # otherwise back off geometrically toward the idle ceiling (waiting on stranded
+  # reviews to converge or new tickets to arrive).
   if [ "${#batch[@]}" -gt 0 ]; then
     cur_sleep="$POLL_MIN"
   else

@@ -4,7 +4,8 @@ Automates the back half of the Matt Pocock workflow. You keep doing the manual
 front half (`/grill-with-docs → /to-spec → /to-tickets`), **including triage** —
 only issues you have triaged by hand and labeled `ready-for-agent` are picked up.
 This then drains that queue — polling while work is in flight, and exiting once
-the queue is empty and no PRs remain in flight.
+the queue is empty and nothing is mid-review. Approved PRs are left un-drafted
+for you to merge; Ralph never merges.
 
 ## Install (template)
 
@@ -21,7 +22,7 @@ edit one config file. It assumes a JS/npm project with a lint+test gate.
 5. Build the sandbox image: `docker build -t ralph-impl ralph/sandbox`.
 6. Host requirements: a `.claude/settings.json` with a non-empty
    `permissions.allow[]` (lib.sh hard-exits without it); branch protection on the
-   base branch requiring your lint+test check, with repo auto-merge and
+   base branch requiring your lint+test check, with repo
    delete-branch-on-merge enabled; `claude`, `gh` (authenticated), `docker`,
    `jq`, and `flock` on PATH; the `/implement`, `/tdd`, and `/code-review`
    skills in `~/.claude/skills/` (or `~/.agents/skills/`).
@@ -64,16 +65,14 @@ edit one config file. It assumes a JS/npm project with a lint+test gate.
    review can't approve a red worktree. In AFK mode a pass that doesn't approve is
    not a handback: a red gate rebuilds, anything else re-reviews, looping until it
    converges (`MAX_REVIEW_CYCLES` is the per-pass budget, not a give-up point).
-7. On approval, the PR is un-drafted (`gh pr ready`) and **CI-gated auto-merge is
-   enabled inline** (`gh pr merge --auto --squash`) — GitHub lands the PR the
-   moment the required check passes, after Ralph has exited. Nothing lands red,
-   and there is no aged human window. Success is judged from the PR **state**
-   (`MERGED` / auto-merge enabled), not `gh`'s exit code. The head branch is
-   deleted by the repo's **delete-branch-on-merge** setting (so enable it); the
-   local branch + worktree are removed in `cleanup()`. `--delete-branch` is
-   deliberately NOT passed — `gh` runs inside the worktree where `issue/N` is
-   checked out, so its local-branch deletion fails (the base branch is held by
-   another worktree) and makes `gh` exit non-zero even on a clean merge.
+7. On approval, the PR is un-drafted (`gh pr ready`) and **left for you to
+   merge**. Ralph never merges and never enables auto-merge: the merge is the
+   one deliberate human checkpoint at the end of the loop, and branch
+   protection's required CI check still keeps a red PR from landing. Success is
+   judged from the PR **state** (open and no longer draft), not `gh`'s exit
+   code. When you merge, the head branch is deleted by the repo's
+   **delete-branch-on-merge** setting (so enable it); the local branch +
+   worktree are removed in `cleanup()`.
 
 Each review and each fix is a separate `claude -p` process, so the reviewer
 never inherits the implementer's context — it stays unbiased.
@@ -158,10 +157,12 @@ checked out: when you are parked on another branch the base ref is
 fast-forwarded in place via a fetch refspec), processes every
 eligible issue, then **polls adaptively** — fast (`POLL_MIN`, default 2 min)
 while the queue has work, backing off geometrically (`POLL_BACKOFF`) toward the
-idle ceiling `POLL_INTERVAL` (default 30 min) while only waiting on in-flight PRs
-to merge — picking up tickets added or unblocked since the last cycle. It
-**exits** once nothing is eligible and no PR is in flight: a merge that lands
-unblocks its dependents, which a later poll drains before the loop finally quits.
+idle ceiling `POLL_INTERVAL` (default 30 min) while only waiting on stranded
+reviews to converge — picking up tickets added or unblocked since the last cycle.
+It **exits** once nothing is eligible and nothing is mid-review. Approved PRs do
+not block exit — they wait for your merge, which can happen long after the loop
+is gone; a merge that lands unblocks its dependents, which the next run (or a
+still-running loop with queued work) picks up.
 
 Eligible issues are worked in **ascending issue-number order** — the safe filters
 (label, not blocked, no open PR) decide the candidate set, and the lowest number
@@ -197,13 +198,11 @@ a handback is re-entered into the review loop via `resolve-conflicts.sh`.
 Also at the **start of each cycle** it runs a maintenance sweep over its own open
 PRs (head `issue/*`): a PR that has gone **CONFLICTING** with the base branch is rebased
 and re-reviewed (`resolve-conflicts.sh`). Because a PR is un-drafted only on
-approval, a **non-draft** `issue/*` PR reliably means *approved* — so for those
-the sweep idempotently re-ensures **CI-gated auto-merge** is enabled (the inline
-enable at approval already did this; the sweep is the safety net for a failed
-enable or a resumed PR). An approved + mergeable PR whose required CI check is
-**failing** can never auto-merge, so instead of waiting forever it is handed back
-to a human: re-drafted, title prefixed, issue relabeled. Issues that already have
-an open PR are **never re-picked** for fresh work.
+approval, a **non-draft** `issue/*` PR reliably means *approved*. Approved + green
+PRs are left alone, waiting for your merge. An approved + mergeable PR whose
+required CI check is **failing** would sit unmergeable on your desk, so it is
+handed back explicitly: re-drafted, title prefixed, issue relabeled. Issues that
+already have an open PR are **never re-picked** for fresh work.
 
 > Issues are processed up to `RALPH_CONCURRENCY` at a time (default 1 =
 > sequential), each branched from the latest `origin/<base>`. Several eligible
@@ -276,7 +275,7 @@ POLL_MIN=60         ./ralph/run.sh     # fast poll floor while busy (default 120
 POLL_BACKOFF=3      ./ralph/run.sh     # idle backoff multiplier toward the ceiling (default 2)
 RALPH_CONCURRENCY=2 ./ralph/run.sh     # issues implemented in parallel (default 1 = sequential)
 
-# review cycles, timeout, base (approved PRs auto-merge inline once CI is green)
+# review cycles, timeout, base (approved PRs are un-drafted and wait for your merge)
 MAX_REVIEW_CYCLES=8 ./ralph/run.sh     # review<->resolve rounds (default 5)
 AGENT_TIMEOUT=7200  ./ralph/run.sh     # allow 2h per agent (default 3600 = 1h)
 BASE_BRANCH=develop ./ralph/run.sh     # default main (set in config.sh)
@@ -367,16 +366,13 @@ demonstrable). It is deliberately **not** wired into the always-run offline
 - The verdict is the count of **unresolved review threads** on the PR, computed
   by `ralph/threads.sh` — there is no parsed keyword. The reviewer is expected to
   post each finding as an inline review thread and resolve the ones it fixes.
-- Auto-merge is **CI-gated**: the base branch requires your lint+test CI check
-  (the check name is yours to define in branch protection) and repo auto-merge
-  is enabled, so `gh pr merge --auto --squash` (enabled
-  inline at approval) only lands a PR once it's green. There is no aged human
-  window — an approved PR merges as soon as CI passes. Enable the repo's
+- The merge is **yours**: Ralph never merges and never enables auto-merge. An
+  approved PR is un-drafted and waits for you; the base branch's required
+  lint+test CI check (the check name is yours to define in branch protection)
+  still keeps a red PR from landing when you merge. Enable the repo's
   **"Automatically delete head branches"** setting (`delete_branch_on_merge`) so
-  merged head branches are cleaned up — Ralph does not pass `--delete-branch`
-  (see step 7). To restore a human checkpoint, drop the inline `gh pr merge` in
-  `process-issue.sh` (and the sweep's re-enable in `maintain_prs`), and merge
-  approved PRs by hand.
+  merged head branches are cleaned up after your merge; the local branch and
+  worktree are removed in `cleanup()`.
 
 ## Security / threat model
 
@@ -409,12 +405,9 @@ worktree it can already read) to an arbitrary host. For that, restrict egress to
 the Anthropic API, and still don't rely on the allowlist: use a
 **least-privilege, repo-scoped token** for the host-side `gh` work, and enable
 **branch protection** on the base branch requiring the CI check, so the merge
-gate holds even if an agent misbehaves. For the automated flow, do **not** also
-require an approving review: Ralph never submits a GitHub review approval (its
-approval is a comment marker plus zero unresolved threads), so with a required
-review nothing ever auto-merges. Approved PRs count as in-flight forever, the
-loop never exits, and the sweep re-enables auto-merge each cycle with no
-handback (the CI-fail handback only fires on failing checks). Requiring an
-approving review is still a valid hardening choice, but understand the
-trade-off: it reintroduces a human merge step, and the loop idles until a human
-approves each PR.
+gate holds even if an agent misbehaves. Since every merge is performed by a
+human, you can also require an approving review without breaking the flow —
+Ralph never submits a GitHub review approval (its approval is a comment marker
+plus zero unresolved threads), so the approving review is simply part of your
+merge step. The implementer and conflict agents are denied `gh pr merge`, and
+Ralph itself never calls it, so nothing lands without you.

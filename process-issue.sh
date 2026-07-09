@@ -9,7 +9,7 @@
 #      pushing to the branch (it never resolves threads — the reviewer does)
 #   5. repeat 3-4 until the unresolved-thread count hits 0 (the verdict is the
 #      count, NOT a parsed APPROVED/CHANGES keyword), or give up after MAX_REVIEW_CYCLES
-#   6. approved -> un-draft the PR and leave it for run.sh's CI-gated auto-merge
+#   6. approved -> un-draft the PR and leave it for a HUMAN to merge
 #
 # Each review and each resolve is a separate `claude -p` process, so neither
 # inherits the other's context — the reviewer stays unbiased by construction.
@@ -281,24 +281,18 @@ until review_and_resolve "$pr_url" "$branch" "$n" "$ilog"; do
   esac
 done
 
-# --- 5. Approved: enable CI-gated auto-merge inline --------------------------
-# GitHub merges the PR the moment required checks pass — after this process (and
-# the loop) have exited. NB: no --delete-branch here. gh runs it from inside the
-# worktree where issue/N is checked out, so deleting the LOCAL branch needs to
-# switch to master (held by another worktree) and gh exits non-zero EVEN WHEN the
-# merge/enable succeeded — the old misleading "did not enable" log. Remote-branch
-# cleanup is handed to the repo's delete-branch-on-merge setting instead; the local
-# branch + worktree are removed in cleanup(). So trust the PR STATE, not $?.
+# --- 5. Approved: un-draft and leave the merge to a human --------------------
+# Ralph never merges and never enables auto-merge — approve_pr un-drafts the PR
+# and posts the approval marker; you merge it when you're ready (the one human
+# checkpoint). Remote-branch cleanup is handed to the repo's
+# delete-branch-on-merge setting; the local branch + worktree are removed in
+# cleanup(). Verify by PR STATE, not gh's exit code.
 record_metric "$n" approved "${LAST_REVIEW_CYCLES:-}" "$(elapsed)"
-log "#$n: approved — enabling CI-gated auto-merge"
+log "#$n: approved — un-drafting; the merge is yours"
 approve_pr "$pr_url" "$n" "$ilog"
-state="$(gh pr view "$pr_url" --json state -q .state 2>/dev/null || echo UNKNOWN)"
-auto_on="$(gh pr view "$pr_url" --json autoMergeRequest -q '(.autoMergeRequest!=null)' 2>/dev/null || echo false)"
+state="$(gh pr view "$pr_url" --json state,isDraft -q '"\(.state) \(.isDraft)"' 2>/dev/null || echo "UNKNOWN true")"
 case "$state" in
-  MERGED) log "#$n: PR merged — $pr_url" ;;
-  *) if [ "$auto_on" = "true" ]; then
-       log "#$n: auto-merge enabled — GitHub will merge when CI passes — $pr_url"
-     else
-       log "#$n: WARNING — PR neither merged nor auto-merge-enabled (state: $state) — $pr_url needs attention"
-     fi ;;
+  "MERGED "*)  log "#$n: PR already merged — $pr_url" ;;
+  "OPEN false") log "#$n: approved and ready for your merge — $pr_url" ;;
+  *) log "#$n: WARNING — PR not un-drafted as expected (state/draft: $state) — $pr_url needs attention" ;;
 esac

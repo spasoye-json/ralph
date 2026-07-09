@@ -4,7 +4,7 @@
 # Brings a Ralph PR branch up to date with master, resolving any merge conflicts
 # via an agent, then re-runs the code review. Called by run.sh's
 # maintenance sweep when an open Ralph PR goes CONFLICTING (because master moved
-# under it). On success the PR is re-approved and eligible for gated auto-merge;
+# under it). On success the PR is re-approved and ready for a human merge;
 # if conflicts can't be resolved cleanly it's handed to a human.
 
 source "$(dirname "$0")/lib.sh"
@@ -54,7 +54,7 @@ fi
 # Rebase rewrites history, so the push must be a (lease-guarded) force.
 git push --force-with-lease origin "$branch" >>"$ilog" 2>&1 || { log "#$n: force-push after rebase failed"; exit 1; }
 
-# Re-review the updated PR; on APPROVED it becomes auto-merge-eligible again. In
+# Re-review the updated PR; on APPROVED it is ready for a human merge again. In
 # AFK mode review_and_resolve does NOT hand back — it returns REVIEW_FAIL_REASON
 # and we re-review. This runs inside run.sh's maintenance sweep, so it must not
 # loop forever: cap the re-reviews, and fall back to an explicit human handback on
