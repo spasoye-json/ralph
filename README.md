@@ -116,7 +116,9 @@ DRY_RUN=1 ./ralph/run.sh   # list what it would pick up right now, then exit
 The `/implement` implementer — the only stage that writes and runs un-reviewed generated
 code — runs inside a throwaway Docker container (`RALPH_SANDBOX=1`, default). It
 sees **only** the worktree, the shared git dir, the global skills (read-only) and
-`node_modules` (read-only); the host `$HOME` (ssh/aws/claude credentials) is never
+`node_modules` (read-only). Inside the shared git dir, `.git/config` and
+`.git/hooks` are shadow-mounted read-only, so the agent cannot plant hooks or
+config that would later execute on the host. The host `$HOME` (ssh/aws/claude credentials) is never
 mounted, capabilities are dropped, and the container is removed on exit. The box
 has no `gh` and no GitHub token — the issue text is injected into the prompt and
 all git/PR work happens on the host. Network stays on (claude must reach the API),

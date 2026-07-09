@@ -249,6 +249,16 @@ sandbox_impl_cmd() {
     -v "$HOME/.claude/skills:/home/agent/.claude/skills:ro"
     -w "$wt"
   )
+  # The shared .git is rw so worktree commits land, but .git/config and .git/hooks
+  # must stay read-only: an agent write there (core.fsmonitor, core.hooksPath, a
+  # pre-push hook) would execute ON THE HOST the next time host-side git runs —
+  # a sandbox escape. Shadow them with more-specific ro mounts (docker applies the
+  # most specific one). The -e guard keeps docker from creating a root-owned stub
+  # for a missing path.
+  [ -e "$REPO_ROOT/.git/config" ] && \
+    CLAUDE_CMD+=( -v "$REPO_ROOT/.git/config:$REPO_ROOT/.git/config:ro" )
+  [ -e "$REPO_ROOT/.git/hooks" ] && \
+    CLAUDE_CMD+=( -v "$REPO_ROOT/.git/hooks:$REPO_ROOT/.git/hooks:ro" )
   # Global skills (e.g. /implement) are relative symlinks under ~/.claude/skills into
   # ~/.agents/skills. Mounting only ~/.claude/skills leaves them dangling in the
   # container, so mount the target too — at the path the links resolve to under
