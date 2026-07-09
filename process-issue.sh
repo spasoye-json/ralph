@@ -205,7 +205,10 @@ create_pr() {
 Create it with: gh pr create --draft --base $BASE_BRANCH --head $branch --title \"<conventional-commit title, NOT 'Issue #$n'>\" --body-file <file>
 The body MUST end with a line 'Closes #$n'." \
     >/dev/null || true   # the PR-URL lookup decides success
-  pr_url="$(gh pr view "$branch" --json url -q .url 2>/dev/null || true)"
+  # Require an OPEN PR: without the state filter 'gh pr view <branch>' falls back
+  # to the most recent PR on the branch — including a MERGED/CLOSED one — so a
+  # failed create after an earlier merged PR would read as success.
+  pr_url="$(gh pr view "$branch" --json url,state -q 'select(.state=="OPEN") | .url' 2>/dev/null || true)"
   [ -n "$pr_url" ]
 }
 pr_tries=0
