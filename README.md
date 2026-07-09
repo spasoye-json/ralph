@@ -1,7 +1,7 @@
 # Ralph orchestration — automated /implement → /code-review → CI-gated merge
 
 Automates the back half of the Matt Pocock workflow. You keep doing the manual
-front half (`/grill-with-docs → /to-prd → /to-issues`), **including triage** —
+front half (`/grill-with-docs → /to-spec → /to-tickets`), **including triage** —
 only issues you have triaged by hand and labeled `ready-for-agent` are picked up.
 This then drains that queue — polling while work is in flight, and exiting once
 the queue is empty and no PRs remain in flight.
