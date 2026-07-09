@@ -345,7 +345,7 @@ stage_policy() {
 claude_run() {
   local stage="$1" issue="$2" logf="$3" prompt="$4"; shift 4
   local args=("${MCP_TRIM_ARGS[@]}" "$@") to="${CLAUDE_TIMEOUT:-$AGENT_TIMEOUT}"
-  timeout "$to" "${CLAUDE_CMD[@]}" -p "$prompt" "${args[@]}" 2>>"$logf" | tee -a "$logf"
+  timeout -k 30 "$to" "${CLAUDE_CMD[@]}" -p "$prompt" "${args[@]}" 2>>"$logf" | tee -a "$logf"
   return "${PIPESTATUS[0]}"
 }
 
