@@ -65,7 +65,7 @@ else
 
       print ""
       print "by outcome:"
-      n = split("approved handback verify-fail no-commits tdd-error triage-skip test-fail pr-failed escalated secret-detected ci-fail conflict-unresolved", order, " ")
+      n = split("approved handback verify-fail no-commits tdd-error test-fail pr-failed escalated secret-detected ci-fail conflict-unresolved budget-exceeded", order, " ")
       for (i = 1; i <= n; i++) {
         o = order[i]
         if (o in outcome) { printf "  %-12s %d\n", o, outcome[o]; seen[o] = 1 }
