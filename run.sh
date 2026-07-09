@@ -118,17 +118,27 @@ process_one() {
   return 0
 }
 
-# Fast-forward the main checkout's BASE_BRANCH to origin so freshly-merged PRs are
-# reflected locally. --ff-only NEVER rewrites local commits: if the checkout has
-# diverged it logs and leaves them for a manual pull/rebase. Ralph itself doesn't
-# need this (worktrees are cut from origin/$BASE_BRANCH), but it keeps the human's
+# Fast-forward the main checkout's local BASE_BRANCH ref to origin so freshly-
+# merged PRs are reflected locally. NEVER switches branches: if the human is
+# parked on a feature branch (or detached), the ref is updated in place via a
+# fast-forward-only fetch refspec (no leading '+', so it never rewrites local
+# commits — same safety property as --ff-only); only when BASE_BRANCH is already
+# checked out is the working tree fast-forwarded too. On divergence it logs and
+# leaves the commits for a manual pull/rebase. Ralph itself doesn't need this
+# (worktrees are cut from origin/$BASE_BRANCH), but it keeps the human's
 # checkout current — run each cycle and once more on exit, since the loop drains
 # and exits before the next cycle-start refresh would otherwise run.
 refresh_base() {
+  local head
   git fetch origin "$BASE_BRANCH" -q 2>/dev/null || return 0
-  git switch "$BASE_BRANCH" -q 2>/dev/null || return 0
-  git merge --ff-only "origin/$BASE_BRANCH" -q 2>/dev/null \
-    || log "  local $BASE_BRANCH not fast-forwarded (diverged / local commits?) — pull manually"
+  head="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" || return 0
+  if [ "$head" = "$BASE_BRANCH" ]; then
+    git merge --ff-only "origin/$BASE_BRANCH" -q 2>/dev/null \
+      || log "  local $BASE_BRANCH not fast-forwarded (diverged / local commits?) — pull manually"
+  else
+    git fetch origin "$BASE_BRANCH:$BASE_BRANCH" -q 2>/dev/null \
+      || log "  local $BASE_BRANCH not fast-forwarded (diverged / local commits?) — pull manually"
+  fi
 }
 
 # Re-queue issues stuck in WORKING_LABEL with no open PR — orphaned by a
