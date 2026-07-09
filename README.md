@@ -94,16 +94,16 @@ a human are **safety/systemic stops** that retrying cannot clear:
   maintenance path (`resolve-conflicts.sh`) — it runs inside the sweep and can't
   block forever, so it bounds its retries then hands back.
 
-`RALPH_MAX_ATTEMPTS` (default `0` = unlimited) is an optional brake on attempts
+`RALPH_MAX_ATTEMPTS` (default `8`; `0` = unlimited) is a brake on attempts
 per issue. It counts implementer attempts, review rounds, and failed
 correctness-verifier rounds, so the cap bounds the verifier loop too; on hit,
 the issue is **re-queued** (`ready-for-agent`),
 not handed to a human. Set `RALPH_AFK=0` to restore the legacy hand-back-on-first-
-failure behavior. **Caveat:** with `RALPH_CONCURRENCY=1`, "retry until green" on a
-genuinely-impossible ticket grinds that issue and blocks the queue behind it —
-that's the cost of unlimited retries; cap it with `RALPH_MAX_ATTEMPTS` if needed.
+failure behavior. **Caveat:** with `RALPH_CONCURRENCY=1` and the brakes set to
+`0` (unlimited), "retry until green" on a genuinely-impossible ticket grinds
+that issue and blocks the queue behind it. The default cap avoids that.
 
-`RALPH_ISSUE_BUDGET` (default `0` = off) is a second, wall-clock brake for the same
+`RALPH_ISSUE_BUDGET` (default `7200`; `0` = off) is a second, wall-clock brake for the same
 grind: an issue that is still looping after the budget (seconds) is **re-queued**
 with a `budget-exceeded` metric row. This matters for the circuit breaker — an
 endlessly-grinding issue never records an outcome, so without a budget the breaker
@@ -304,9 +304,9 @@ METRICS_FILE=logs/metrics.csv ./ralph/run.sh # per-issue outcome log, gitignored
 
 # AFK / retry-until-green
 RALPH_AFK=0           ./ralph/run.sh     # 0 = legacy hand-back-on-failure; 1 = retry until green (default)
-RALPH_MAX_ATTEMPTS=8  ./ralph/run.sh     # cap attempts per issue: implementer + review + failed verifier rounds (default 0 = unlimited)
+RALPH_MAX_ATTEMPTS=0  ./ralph/run.sh     # cap attempts per issue: implementer + review + failed verifier rounds (default 8; 0 = unlimited)
 RALPH_INFRA_RETRIES=5 ./ralph/run.sh     # consecutive /implement crashes tolerated before declaring an infra error (default 3)
-RALPH_ISSUE_BUDGET=14400 ./ralph/run.sh  # per-issue wall-clock budget in seconds (default 0 = off); on hit the issue is re-queued, not handed back
+RALPH_ISSUE_BUDGET=14400 ./ralph/run.sh  # per-issue wall-clock budget in seconds (default 7200; 0 = off); on hit the issue is re-queued, not handed back
 
 # circuit breaker
 RALPH_MAX_HANDBACKS=10 ./ralph/run.sh    # stop after N consecutive handbacks (default 6; 0 = disabled)

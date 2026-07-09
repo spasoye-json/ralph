@@ -32,10 +32,13 @@ RALPH_MAX_INFRA_ERRORS="${RALPH_MAX_INFRA_ERRORS:-2}" # circuit breaker: stop fa
 # test gate passes; the correctness verifier and the review loop re-loop the same
 # way. The only stops that remain are safety/systemic ones retrying cannot clear
 # (leaked secret, repeated /implement crash, unresolvable rebase conflict).
+# The attempt cap and wall-clock budget are ON by default so one impossible
+# ticket cannot grind unbounded: a capped issue is re-queued with a fail outcome
+# the circuit breaker can see. Set both to 0 for the old unlimited behaviour.
 RALPH_AFK="${RALPH_AFK:-1}"                     # 1 = fully autonomous (no quality handbacks); 0 = legacy hand-back-on-failure
-RALPH_MAX_ATTEMPTS="${RALPH_MAX_ATTEMPTS:-0}"  # implementer/review attempts per issue before giving up (0 = unlimited = "retry until green")
+RALPH_MAX_ATTEMPTS="${RALPH_MAX_ATTEMPTS:-8}"  # implementer/review/verifier attempts per issue before re-queueing (0 = unlimited = "retry until green")
 RALPH_INFRA_RETRIES="${RALPH_INFRA_RETRIES:-3}" # consecutive /implement crashes (or PR-author failures) tolerated before declaring an infra error
-RALPH_ISSUE_BUDGET="${RALPH_ISSUE_BUDGET:-0}"  # per-issue wall-clock budget in seconds; on hit the issue is RE-QUEUED (not handed back) and a fail outcome reaches the circuit breaker (0 = off)
+RALPH_ISSUE_BUDGET="${RALPH_ISSUE_BUDGET:-7200}" # per-issue wall-clock budget in seconds; on hit the issue is RE-QUEUED (not handed back) and a fail outcome reaches the circuit breaker (0 = off)
 # Approved PRs enable CI-gated auto-merge inline at approval time (GitHub merges
 # them server-side when checks pass), so there is no aged human merge window.
 WORKTREE_ROOT="${WORKTREE_ROOT:-..}"           # where sibling worktrees are created
