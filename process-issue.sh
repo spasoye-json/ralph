@@ -118,11 +118,13 @@ budget_exceeded() { [ "${RALPH_ISSUE_BUDGET:-0}" -gt 0 ] && [ "$(elapsed)" -ge "
 has_commits()     { ! git diff --quiet "origin/$BASE_BRANCH"...HEAD; }
 
 # stop_issue <outcome> <exit-code> <reason> — relabel and record a terminal stop.
-# exit 3 is an infra error (a human / the circuit breaker handles it); other codes
-# re-queue the issue (ready-for-agent) so a later run retries from a fresh worktree.
+# exit 3 is an infra error and exit 5 a safety stop (leaked secret) — both go to a
+# human, never back to the queue (run.sh maps 5 to a generic fail for the circuit
+# breaker); other codes re-queue the issue (ready-for-agent) so a later run
+# retries from a fresh worktree.
 stop_issue() {
   local outcome="$1" code="$2" reason="$3" lbl="$READY_LABEL"
-  [ "$code" = "3" ] && lbl="$HUMAN_LABEL"
+  case "$code" in 3|5) lbl="$HUMAN_LABEL" ;; esac
   log "#$n: $reason — ${lbl}"
   gh issue edit "$n" --remove-label "$WORKING_LABEL" --add-label "$lbl" >/dev/null
   record_metric "$n" "$outcome" "" "$(elapsed)" "$reason"
@@ -182,7 +184,7 @@ esac
 # high-confidence secret. This is the one quality-independent hard stop that
 # retrying cannot safely clear, so it still goes to a human even in AFK mode.
 if ! run_safety_scan "$ilog"; then
-  stop_issue secret-detected 1 "high-confidence secret in PR diff — safety stop (see issue-$n.log)"
+  stop_issue secret-detected 5 "high-confidence secret in PR diff — safety stop (see issue-$n.log)"
 fi
 
 # --- 2. Open the PR up front (agent-authored title + body) -------------------
@@ -259,7 +261,7 @@ done
 until review_and_resolve "$pr_url" "$branch" "$n" "$ilog"; do
   ATTEMPTS=$((ATTEMPTS + ${LAST_REVIEW_CYCLES:-1}))
   case "${REVIEW_FAIL_REASON:-threads}" in
-    secret) stop_issue secret-detected 1 "secret appeared in the diff during review — safety stop" ;;
+    secret) stop_issue secret-detected 5 "secret appeared in the diff during review — safety stop" ;;
     gate)
       log "#$n: a review fix left lint/tests red — rebuilding until green"
       rebuild_or_stop "A change made during code review left lint or tests FAILING in $TEST_DIR. Fix them until '$LINT_CMD' and '$TEST_CMD' both pass." handback ;;
