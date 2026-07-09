@@ -509,19 +509,32 @@ classify_pr() {
 }
 
 # pr_fields <num> -> "<is_draft 0|1>\t<title>\t<marker_epoch|"">\t<commit_epoch|"">"
-# THIN ADAPTER: the only gh/date I/O behind classify_pr. ONE gh call.
+# THIN ADAPTER: the only gh/date I/O behind classify_pr. ONE gh call (GraphQL:
+# `gh pr view --json comments` returns only the FIRST 100 comments, so on a
+# long-lived PR the late-posted marker fell outside the window and an approved
+# PR misclassified as human; comments(last:100) reads from the end instead).
 #   marker_epoch = createdAt of the LAST comment whose body startswith
 #                  $APPROVAL_MARKER, ISO->epoch via `date` ("" if none)
 #   commit_epoch = committedDate of the LAST commit, ISO->epoch ("" if unreadable)
 #   is_draft     = 1 if .isDraft else 0
 pr_fields() {
-  local num="$1" json draft title marker_iso commit_iso m c
-  json="$(gh pr view "$num" --json isDraft,title,comments,commits 2>/dev/null)" || return 1
-  draft="$(printf '%s' "$json" | jq -r 'if .isDraft then 1 else 0 end' 2>/dev/null || echo 0)"
-  title="$(printf '%s' "$json" | jq -r '.title // ""' 2>/dev/null || echo "")"
-  marker_iso="$(printf '%s' "$json" \
-    | jq -r "[.comments[] | select(.body | startswith(\"$APPROVAL_MARKER\")) | .createdAt] | last // empty" 2>/dev/null || true)"
-  commit_iso="$(printf '%s' "$json" | jq -r '.commits[-1].committedDate // empty' 2>/dev/null || true)"
+  local num="$1" json pr draft title marker_iso commit_iso m c
+  json="$(gh api graphql -F owner='{owner}' -F name='{repo}' -F pr="$num" -f query='
+    query($owner:String!,$name:String!,$pr:Int!){
+      repository(owner:$owner,name:$name){
+        pullRequest(number:$pr){
+          isDraft title
+          comments(last:100){nodes{body createdAt}}
+          commits(last:1){nodes{commit{committedDate}}}
+        }}}' 2>/dev/null)" || return 1
+  pr='.data.repository.pullRequest'
+  draft="$(printf '%s' "$json" | jq -r "if $pr.isDraft then 1 else 0 end" 2>/dev/null || echo 0)"
+  title="$(printf '%s' "$json" | jq -r "$pr.title // \"\"" 2>/dev/null || echo "")"
+  # $APPROVAL_MARKER goes in via --arg (not shell-interpolated into the program)
+  # so quotes/backslashes in a custom marker can't corrupt the jq filter.
+  marker_iso="$(printf '%s' "$json" | jq -r --arg mk "$APPROVAL_MARKER" \
+    "[$pr.comments.nodes[] | select(.body | startswith(\$mk)) | .createdAt] | last // empty" 2>/dev/null || true)"
+  commit_iso="$(printf '%s' "$json" | jq -r "$pr.commits.nodes[-1].commit.committedDate // empty" 2>/dev/null || true)"
   m=""; [ -n "$marker_iso" ] && m="$(date -d "$marker_iso" +%s 2>/dev/null || echo "")"
   c=""; [ -n "$commit_iso" ] && c="$(date -d "$commit_iso" +%s 2>/dev/null || echo "")"
   printf '%s\t%s\t%s\t%s' "$draft" "$title" "$m" "$c"
