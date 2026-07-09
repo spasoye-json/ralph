@@ -90,8 +90,10 @@ a human are **safety/systemic stops** that retrying cannot clear:
   maintenance path (`resolve-conflicts.sh`) — it runs inside the sweep and can't
   block forever, so it bounds its retries then hands back.
 
-`RALPH_MAX_ATTEMPTS` (default `0` = unlimited) is an optional brake on implementer/
-review attempts per issue; on hit, the issue is **re-queued** (`ready-for-agent`),
+`RALPH_MAX_ATTEMPTS` (default `0` = unlimited) is an optional brake on attempts
+per issue. It counts implementer attempts, review rounds, and failed
+correctness-verifier rounds, so the cap bounds the verifier loop too; on hit,
+the issue is **re-queued** (`ready-for-agent`),
 not handed to a human. Set `RALPH_AFK=0` to restore the legacy hand-back-on-first-
 failure behavior. **Caveat:** with `RALPH_CONCURRENCY=1`, "retry until green" on a
 genuinely-impossible ticket grinds that issue and blocks the queue behind it —
@@ -293,7 +295,7 @@ METRICS_FILE=logs/metrics.csv ./ralph/run.sh # per-issue outcome log, gitignored
 
 # AFK / retry-until-green
 RALPH_AFK=0           ./ralph/run.sh     # 0 = legacy hand-back-on-failure; 1 = retry until green (default)
-RALPH_MAX_ATTEMPTS=8  ./ralph/run.sh     # cap implementer/review attempts per issue (default 0 = unlimited)
+RALPH_MAX_ATTEMPTS=8  ./ralph/run.sh     # cap attempts per issue: implementer + review + failed verifier rounds (default 0 = unlimited)
 RALPH_INFRA_RETRIES=5 ./ralph/run.sh     # consecutive /implement crashes tolerated before declaring an infra error (default 3)
 RALPH_ISSUE_BUDGET=14400 ./ralph/run.sh  # per-issue wall-clock budget in seconds (default 0 = off); on hit the issue is re-queued, not handed back
 

@@ -250,6 +250,12 @@ rebuild_or_stop() {
 # (which keeps the gate green) until the verifier passes — never a handback.
 while ! verify_issue "$pr_url" "$n" "$ilog"; do
   budget_exceeded && stop_issue budget-exceeded 1 "wall-clock budget RALPH_ISSUE_BUDGET=${RALPH_ISSUE_BUDGET}s exceeded before the correctness gate passed — re-queued"
+  # Count each failed verification against RALPH_MAX_ATTEMPTS here, before the
+  # rebuild: build_until_green only bumps ATTEMPTS on a red gate or no commits, so
+  # a verifier that keeps failing cheap-but-green rebuilds would otherwise spin
+  # uncapped (only the wall-clock budget, default off, would stop it).
+  ATTEMPTS=$((ATTEMPTS+1))
+  attempt_cap_hit && stop_issue verify-fail 1 "attempt cap RALPH_MAX_ATTEMPTS=${RALPH_MAX_ATTEMPTS} reached before the correctness gate passed"
   log "#$n: correctness gap vs ticket — re-running implementer to satisfy issue #$n"
   rebuild_or_stop "An independent reviewer judged the change does NOT fully satisfy issue #$n: a stated acceptance criterion or an edge case (boundaries, empty or missing input, error paths) is unmet. Re-read issue #$n and strengthen the implementation and its tests so every acceptance criterion and edge case is covered." verify-fail
 done
