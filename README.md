@@ -27,6 +27,10 @@ edit one config file. It assumes a JS/npm project with a lint+test gate.
    skills in `~/.claude/skills/` (or `~/.agents/skills/`).
 7. Smoke test: `./ralph/eval.sh` (offline, free), then `./ralph/status.sh`.
 
+> **GNU/Linux only.** The scripts rely on GNU `grep -P`, gawk `IGNORECASE`,
+> GNU `date -d`, and `flock`. On macOS `parse_blockers` and `pr_fields`
+> silently break.
+
 ## What it does, per issue
 
 1. `/implement` implements the issue in its own worktree and context (no turn
@@ -146,7 +150,12 @@ Only the implementer is sandboxed — the reviewer is already read-only, and the
 PR-author/verifier need `gh` on the host.
 
 `run.sh` takes a `flock` lock, so a second concurrent instance exits rather than
-racing the label-claim. Each cycle it refreshes the base branch, processes every
+racing the label-claim. The lock is per-clone (it lives in the clone's log dir),
+so two ralph instances in separate clones of the same repo are not mutually
+excluded and will race the label claim. Run one instance per repo.
+Each cycle it refreshes the base branch (never switching the branch you have
+checked out: when you are parked on another branch the base ref is
+fast-forwarded in place via a fetch refspec), processes every
 eligible issue, then **polls adaptively** — fast (`POLL_MIN`, default 2 min)
 while the queue has work, backing off geometrically (`POLL_BACKOFF`) toward the
 idle ceiling `POLL_INTERVAL` (default 30 min) while only waiting on in-flight PRs
@@ -399,5 +408,13 @@ access, so it is **not** a defence against an agent exfiltrating the repo (the
 worktree it can already read) to an arbitrary host. For that, restrict egress to
 the Anthropic API, and still don't rely on the allowlist: use a
 **least-privilege, repo-scoped token** for the host-side `gh` work, and enable
-**branch protection** on the base branch requiring an approving review *and* the
-CI check — so the merge gate holds even if an agent misbehaves.
+**branch protection** on the base branch requiring the CI check, so the merge
+gate holds even if an agent misbehaves. For the automated flow, do **not** also
+require an approving review: Ralph never submits a GitHub review approval (its
+approval is a comment marker plus zero unresolved threads), so with a required
+review nothing ever auto-merges. Approved PRs count as in-flight forever, the
+loop never exits, and the sweep re-enables auto-merge each cycle with no
+handback (the CI-fail handback only fires on failing checks). Requiring an
+approving review is still a valid hardening choice, but understand the
+trade-off: it reintroduces a human merge step, and the loop idles until a human
+approves each PR.
