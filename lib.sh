@@ -126,6 +126,10 @@ RALPH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --allowedTools). Loaded by ralph_init. Implementers are additionally DENIED
 # 'gh pr merge' (IMPL_DISALLOW) so an agent cannot self-merge its own PR and
 # bypass review + the human window.
+# The allowlist is OPTIONAL: a project with no .claude/settings.json leaves this
+# empty, and run_stage falls back to bypassPermissions for the roles that use it.
+# Those roles are the sandboxed writers, where the container is the real boundary
+# and the allowlist was only ever a convenience filter.
 ALLOWED_TOOLS=()
 IMPL_DISALLOW=("Bash(gh pr merge:*)")
 
@@ -191,8 +195,7 @@ ralph_init() {
 
   mapfile -t ALLOWED_TOOLS < <(jq -r '.permissions.allow[]' "$REPO_ROOT/.claude/settings.json" 2>/dev/null)
   if [ "${#ALLOWED_TOOLS[@]}" -eq 0 ]; then
-    echo "ralph: empty allowlist — check $REPO_ROOT/.claude/settings.json" >&2
-    exit 1
+    echo "ralph: no allowlist in $REPO_ROOT/.claude/settings.json — writer roles run with bypassPermissions inside the sandbox" >&2
   fi
 
   if [ "$RALPH_TRIM_MCP" = "1" ] && command -v claude >/dev/null 2>&1; then
@@ -418,9 +421,16 @@ run_stage() {
   fi
 
   local extra=("${MODEL_ARGS[@]}")
-  [ "$SP_ACCEPT_EDITS" = 1 ] && extra+=(--permission-mode acceptEdits)
   extra+=(--append-system-prompt "$SP_GUARD")
-  extra+=(--allowedTools "${SP_TOOLS[@]}")
+  # An empty SP_TOOLS must NOT emit a bare --allowedTools: it would swallow the
+  # next flag as its value. No allowlist means the sandbox is the only boundary,
+  # so the role runs unattended under bypassPermissions instead.
+  if [ "${#SP_TOOLS[@]}" -eq 0 ]; then
+    extra+=(--permission-mode bypassPermissions)
+  else
+    [ "$SP_ACCEPT_EDITS" = 1 ] && extra+=(--permission-mode acceptEdits)
+    extra+=(--allowedTools "${SP_TOOLS[@]}")
+  fi
   [ "${#SP_DISALLOW[@]}" -gt 0 ] && extra+=(--disallowedTools "${SP_DISALLOW[@]}")
 
   claude_run "$role" "$issue" "$logf" "$prompt" "${extra[@]}"
