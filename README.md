@@ -135,13 +135,17 @@ and edit one config file. It assumes a JS/npm project with a lint+test gate.
 4. Create the labels:
    `for l in ready-for-agent claude-working ready-for-human; do gh label create "$l"; done`
 5. Build the sandbox image: `docker build -t ralph-impl ralph/sandbox`.
-6. Host requirements: a `.claude/settings.json` with a non-empty
+6. Install the skills:
+   `claude plugin install mattpocock-skills@claude-plugins-official`, then
+   `./ralph/link-skills.sh`. The script links `/implement`, `/tdd` and
+   `/code-review` from the plugin into `~/.claude/skills/` so they resolve on
+   the host and inside the sandbox. Re-run it after a plugin update.
+7. Host requirements: a `.claude/settings.json` with a non-empty
    `permissions.allow[]` (lib.sh hard-exits without it); branch protection on
    the base branch requiring your lint+test check, with repo
    delete-branch-on-merge enabled; `claude`, `gh` (authenticated), `docker`,
-   `jq`, and `flock` on PATH; the `/implement`, `/tdd`, and `/code-review`
-   skills in `~/.claude/skills/` (or `~/.agents/skills/`).
-7. Smoke test: `./ralph/eval.sh` (offline, free), then `./ralph/status.sh`.
+   `jq`, and `flock` on PATH.
+8. Smoke test: `./ralph/eval.sh` (offline, free), then `./ralph/status.sh`.
 
 > **GNU/Linux only.** The scripts rely on GNU `grep -P`, gawk `IGNORECASE`,
 > GNU `date -d`, and `flock`. On macOS `parse_blockers` and `pr_fields`
@@ -175,9 +179,9 @@ filters (label, not blocked, no open PR) decide the candidate set, and the
 lowest number goes first. `DRY_RUN=1 ./ralph/run.sh` prints the issues it
 would pick up.
 
-Each **agent stage runs on a cost-appropriate model** (see Tunables): the hard
-stages (`/implement`, review) stay on your CLI default; the mechanical stages
-(fixes, conflict resolution, PR authoring) use cheaper and faster tiers.
+Each **agent stage runs on a fixed model** (see Tunables): the writing stages
+(`/implement`, fixes, conflict resolution, PR authoring) run on Claude Opus 5,
+and the judging stages (review, verification) run on Claude Fable 5.
 
 Issues can be implemented **concurrently** (`RALPH_CONCURRENCY`, default 1 =
 sequential), each in its own worktree, with git ref and worktree setup
@@ -279,6 +283,8 @@ cycle after you merge its blocker.
                             ignored inside the untrusted per-issue worktrees)
 ralph/config.sh             ← the config seam: labels, base branch, gate dir and
                             commands, sandbox image, node_modules mount dirs
+ralph/link-skills.sh        link /implement, /tdd, /code-review from the
+                            mattpocock-skills plugin into ~/.claude/skills
 ralph/run.sh                ← the continuous loop you start and Ctrl-C to stop
 ralph/process-issue.sh      one issue, end to end (implement → PR → review)
 ralph/resolve-conflicts.sh  rebase a PR onto the base, resolve, re-review
@@ -291,8 +297,10 @@ ralph/lib.sh                config + helpers + review_and_resolve (sourced)
 ralph/.gitignore            ignores logs/ (metrics)
 ```
 
-Your `/implement`, `/tdd`, and `/code-review` skills stay in
-`~/.claude/skills/` and are not touched.
+The `/implement`, `/tdd`, and `/code-review` skills come from the
+mattpocock-skills plugin. `ralph/link-skills.sh` links them into
+`~/.claude/skills/` and never edits them; the sandbox mounts the link targets
+read-only.
 
 ### Permissions (per role)
 
@@ -327,11 +335,11 @@ AGENT_TIMEOUT=7200  ./ralph/run.sh     # allow 2h per agent (default 3600 = 1h)
 BASE_BRANCH=develop ./ralph/run.sh     # default main (set in config.sh)
 
 # per-stage models (CLI --model alias or full ID; empty = your CLI default)
-MODEL_TDD=opus      ./ralph/run.sh     # implementation, hardest (default empty = CLI default)
-MODEL_REVIEW=opus   ./ralph/run.sh     # quality review, hard (default empty = CLI default)
-MODEL_FIX=sonnet    ./ralph/run.sh     # apply review fixes (default sonnet)
-MODEL_CONFLICT=sonnet ./ralph/run.sh   # resolve rebase conflicts (default sonnet)
-MODEL_PR=haiku      ./ralph/run.sh     # author the PR title and body (default haiku)
+MODEL_TDD=claude-opus-5    ./ralph/run.sh   # implementation (default claude-opus-5)
+MODEL_REVIEW=claude-fable-5 ./ralph/run.sh  # quality review (default claude-fable-5)
+MODEL_FIX=claude-opus-5    ./ralph/run.sh   # apply review fixes (default claude-opus-5)
+MODEL_CONFLICT=claude-opus-5 ./ralph/run.sh # resolve rebase conflicts (default claude-opus-5)
+MODEL_PR=claude-opus-5     ./ralph/run.sh   # author the PR title and body (default claude-opus-5)
 
 # gates
 RALPH_TEST_GATE=0   ./ralph/run.sh     # disable the objective lint+test gate (default 1)
@@ -401,9 +409,9 @@ always-run offline `eval.sh` or CI, because it spends real tokens.
   `--append-system-prompt`, `--allowedTools`, `--disallowedTools`) and the
   `timeout` wrapper match your installed Claude CLI (`claude --help`). They
   live in `process-issue.sh`, `resolve-conflicts.sh`, and `lib.sh`.
-- Your installed CLI accepts the `--model` aliases (`sonnet`, `haiku`) used by
-  the tiered-model defaults; otherwise set the `MODEL_*` vars to full IDs or
-  empty (CLI default).
+- Your account can run the default model IDs (`claude-opus-5`,
+  `claude-fable-5`); otherwise set the `MODEL_*` vars to other IDs or empty
+  (CLI default).
 - MCP trimming uses `--strict-mcp-config --mcp-config <empty>`. Ralph probes
   for `--strict-mcp-config` once at startup and **degrades gracefully**
   (normal run) if it's absent. Set `RALPH_TRIM_MCP=0` to keep ambient MCP

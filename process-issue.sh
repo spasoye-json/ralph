@@ -13,8 +13,9 @@
 #
 # Each review and each resolve is a separate `claude -p` process, so neither
 # inherits the other's context — the reviewer stays unbiased by construction.
-# The /implement and /code-review skills live globally in ~/.claude/skills and
-# are left untouched.
+# The /implement and /code-review skills come from the mattpocock-skills
+# plugin, linked into ~/.claude/skills by ralph/link-skills.sh and left
+# untouched.
 #
 # Usage:  ralph/process-issue.sh <issue-number>
 # Run from the repo root; gh + claude must be on PATH.

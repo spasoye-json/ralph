@@ -45,13 +45,14 @@ WORKTREE_ROOT="${WORKTREE_ROOT:-..}"           # where sibling worktrees are cre
 AGENT_TIMEOUT="${AGENT_TIMEOUT:-3600}"         # seconds before a single claude -p agent is killed
 
 # Per-stage models (Claude CLI --model alias or full ID; empty ⇒ CLI default).
-# Cheap/fast tiers for the mechanical stages; leave the hard stages on the default.
-MODEL_TDD="${MODEL_TDD:-}"                  # implementation — hardest (empty = CLI default)
-MODEL_REVIEW="${MODEL_REVIEW:-}"            # quality review — hard (empty = CLI default)
-MODEL_VERIFY="${MODEL_VERIFY:-$MODEL_REVIEW}"    # correctness/red-team verification (default: same as MODEL_REVIEW)
-MODEL_FIX="${MODEL_FIX:-sonnet}"           # apply review fixes — mostly mechanical
-MODEL_CONFLICT="${MODEL_CONFLICT:-sonnet}" # resolve rebase conflicts
-MODEL_PR="${MODEL_PR:-haiku}"              # author the PR title/body — trivial
+# Two models only: Opus 5 writes (implement, fix, conflict, PR body), Fable 5
+# judges (review, verify). Override per stage via env if you must.
+MODEL_TDD="${MODEL_TDD:-claude-opus-5}"           # implementation
+MODEL_REVIEW="${MODEL_REVIEW:-claude-fable-5}"    # quality review
+MODEL_VERIFY="${MODEL_VERIFY:-$MODEL_REVIEW}"     # correctness/red-team verification (default: same as MODEL_REVIEW)
+MODEL_FIX="${MODEL_FIX:-claude-opus-5}"           # apply review fixes
+MODEL_CONFLICT="${MODEL_CONFLICT:-claude-opus-5}" # resolve rebase conflicts
+MODEL_PR="${MODEL_PR:-claude-opus-5}"             # author the PR title/body
 
 # Correctness / red-team gate: before the (expensive) quality review, a fresh
 # independent agent reads the ORIGINAL ticket's acceptance criteria and the diff
@@ -140,7 +141,7 @@ if [ "${#ALLOWED_TOOLS[@]}" -eq 0 ] && [ "${RALPH_REQUIRE_ALLOWLIST:-1}" = "1" ]
 fi
 IMPL_DISALLOW=("Bash(gh pr merge:*)")
 
-# PR-author allowlist: the haiku PR-author only reads the issue + diff and writes
+# PR-author allowlist: the PR-author only reads the issue + diff and writes
 # one body file, then runs `gh pr create`. It never edits source, pushes, or
 # merges, so it gets a tight surface instead of the full implementer allowlist —
 # the same least-privilege scoping the reviewer already uses.
@@ -203,6 +204,26 @@ mk_model_args() { MODEL_ARGS=(); [ -n "${1:-}" ] && MODEL_ARGS=(--model "$1"); r
 # prefix so /implement runs in a container while every other stage stays on the host.
 CLAUDE_CMD=(claude)
 
+# skill_mounts — set the global SKILL_MOUNTS array to the -v flags that make the
+# /implement, /tdd and /code-review skills resolve inside the container.
+# ~/.claude/skills is mounted whole; each of the three entries may be a SYMLINK
+# whose target lives outside that tree — into the mattpocock-skills plugin cache
+# (ralph/link-skills.sh) or into ~/.agents/skills (the git-clone layout) — so
+# every link target is also mounted read-only at its resolved host path, where
+# the absolute link lands inside the container too. Relative '../../.agents'
+# links are covered by the ~/.agents/skills mount kept for the old layout.
+skill_mounts() {
+  SKILL_MOUNTS=( -v "$HOME/.claude/skills:/home/agent/.claude/skills:ro" )
+  [ -d "$HOME/.agents/skills" ] && SKILL_MOUNTS+=( -v "$HOME/.agents/skills:/home/agent/.agents/skills:ro" )
+  local s tgt
+  for s in implement tdd code-review; do
+    [ -L "$HOME/.claude/skills/$s" ] || continue
+    tgt="$(readlink -f "$HOME/.claude/skills/$s" 2>/dev/null)" || continue
+    [ -d "$tgt" ] && SKILL_MOUNTS+=( -v "$tgt:$tgt:ro" )
+  done
+  return 0
+}
+
 # sandbox_preflight — verify the implementer sandbox can actually run BEFORE any
 # work is claimed. Fails loudly (no silent host fallback) so RALPH_SANDBOX=1 never
 # quietly degrades into running the agent un-sandboxed.
@@ -214,16 +235,14 @@ sandbox_preflight() {
     || { log "sandbox: set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY so the sandboxed claude can authenticate"; return 1; }
   # Smoke-check that /implement — and the /tdd + /code-review skills it delegates
   # to — actually RESOLVE inside the container with the same skill mounts the
-  # implementer uses. They are relative symlinks into ~/.agents/skills, so mounting
-  # only ~/.claude/skills leaves them dangling and claude aborts with "Unknown
-  # command: /implement" — but only AFTER the issue is claimed. Catch that broken
-  # state here, before any label churn.
-  local skill_mounts=( -v "$HOME/.claude/skills:/home/agent/.claude/skills:ro" )
-  [ -d "$HOME/.agents/skills" ] && skill_mounts+=( -v "$HOME/.agents/skills:/home/agent/.agents/skills:ro" )
+  # implementer uses. A dangling symlink (plugin updated, link not re-run) makes
+  # claude abort with "Unknown command: /implement" — but only AFTER the issue is
+  # claimed. Catch that broken state here, before any label churn.
+  skill_mounts
   docker run --rm --user "$(id -u):$(id -g)" -e HOME=/home/agent \
-    "${skill_mounts[@]}" --entrypoint sh "$RALPH_SANDBOX_IMAGE" \
+    "${SKILL_MOUNTS[@]}" --entrypoint sh "$RALPH_SANDBOX_IMAGE" \
     -c 'test -r /home/agent/.claude/skills/implement/SKILL.md -a -r /home/agent/.claude/skills/tdd/SKILL.md -a -r /home/agent/.claude/skills/code-review/SKILL.md' 2>/dev/null \
-    || { log "sandbox: /implement (or /tdd, /code-review) does not resolve inside '"$RALPH_SANDBOX_IMAGE"' (check ~/.agents/skills mount / skill symlinks)"; return 1; }
+    || { log "sandbox: /implement (or /tdd, /code-review) does not resolve inside '"$RALPH_SANDBOX_IMAGE"' — run ralph/link-skills.sh, then re-check the symlinks in ~/.claude/skills"; return 1; }
   return 0
 }
 
@@ -249,7 +268,6 @@ sandbox_impl_cmd() {
     -e GIT_COMMITTER_NAME="$gname" -e GIT_COMMITTER_EMAIL="$gemail"
     -v "$wt:$wt"
     -v "$REPO_ROOT/.git:$REPO_ROOT/.git"
-    -v "$HOME/.claude/skills:/home/agent/.claude/skills:ro"
     -w "$wt"
   )
   # The shared .git is rw so worktree commits land, but .git/config and .git/hooks
@@ -262,12 +280,11 @@ sandbox_impl_cmd() {
     CLAUDE_CMD+=( -v "$REPO_ROOT/.git/config:$REPO_ROOT/.git/config:ro" )
   [ -e "$REPO_ROOT/.git/hooks" ] && \
     CLAUDE_CMD+=( -v "$REPO_ROOT/.git/hooks:$REPO_ROOT/.git/hooks:ro" )
-  # Global skills (e.g. /implement) are relative symlinks under ~/.claude/skills into
-  # ~/.agents/skills. Mounting only ~/.claude/skills leaves them dangling in the
-  # container, so mount the target too — at the path the links resolve to under
-  # the container HOME (/home/agent), where '../../.agents/skills' lands.
-  [ -d "$HOME/.agents/skills" ] && \
-    CLAUDE_CMD+=( -v "$HOME/.agents/skills:/home/agent/.agents/skills:ro" )
+  # Skill mounts: ~/.claude/skills plus every link target (plugin cache or
+  # ~/.agents/skills), so the /implement, /tdd and /code-review symlinks resolve
+  # in the container — see skill_mounts.
+  skill_mounts
+  CLAUDE_CMD+=( "${SKILL_MOUNTS[@]}" )
   for d in "${RALPH_NM_DIRS[@]}"; do
     [ -d "$REPO_ROOT/$d/node_modules" ] || continue
     tgt="$wt/node_modules"; [ "$d" = "." ] || tgt="$wt/$d/node_modules"
@@ -454,7 +471,7 @@ issue_blockers() {
 # referencing issue #<n>. Pure + deterministic so the eval harness can pin it.
 # Load-bearing for the blocker gate above: a dependent only releases once a MERGED
 # PR auto-closes its blocker issue, which requires this trailer. The PR-author is
-# instructed to add it, but nothing guarantees a (haiku) agent did — so
+# instructed to add it, but nothing guarantees the agent did — so
 # process-issue.sh appends 'Closes #<n>' when this returns false. Same stance as
 # the orchestrator-run test gate: never trust the agent's word on a load-bearing
 # step. Mirrors the silent-coupling class of the blocker-format bug.
