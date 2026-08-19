@@ -152,6 +152,7 @@ done
 for w in tdd fix conflict; do
   printf '%s' "$(sp "$w" disallow)" | grep -q 'gh pr merge' && ok || bad "$w must carry IMPL_DISALLOW"
   [ "$(sp "$w" accept_edits)" = 1 ]                          && ok || bad "$w accept_edits=1"
+  [ "$(sp "$w" sandbox)" = 1 ]                               && ok || bad "$w sandbox=1"
 done
 
 # No role may drop the base capability boundary (INJECTION_GUARD).

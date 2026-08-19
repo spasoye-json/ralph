@@ -34,6 +34,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [ "${RALPH_SANDBOX:-0}" = 1 ]; then
+  sandbox_preflight || { log "#$n: writer sandbox unavailable — aborting (set RALPH_SANDBOX=0 to run on host)"; exit 1; }
+fi
+
 if ! worktree_enter "$wt" -B "$branch" "origin/$branch" "$ilog" "$BASE_BRANCH" "$branch"; then
   log "#$n: worktree setup failed (fetch or worktree add — see issue-$n.log) — skipping"
   exit 1

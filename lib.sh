@@ -83,11 +83,12 @@ RALPH_AUDIT="${RALPH_AUDIT:-0}"            # 1 = run `npm audit --audit-level=hi
 # (ssh/aws/claude credentials) is never visible. Capabilities are dropped and the
 # container is removed on exit. Network stays on so claude can reach the API; the
 # box has no gh and no GitHub token (the issue text is injected into the prompt,
-# and all git/PR work happens on the host). Only the implementer is sandboxed: the
+# and all git/PR work happens on the host). Every WRITER is sandboxed — implement,
+# fix and conflict — because all three edit the worktree from untrusted input. The
 # reviewer is already read-only, and the PR-author/verifier need gh on the host.
-RALPH_SANDBOX="${RALPH_SANDBOX:-1}"                    # 1 = sandbox the implementer in docker (image tag: config.sh)
+RALPH_SANDBOX="${RALPH_SANDBOX:-1}"                    # 1 = sandbox the writer roles in docker (image tag: config.sh)
 RALPH_SANDBOX_NM_MODE="${RALPH_SANDBOX_NM_MODE:-ro}"  # node_modules mount mode: ro (safe) | rw
-# Eval-only sandbox opt-out: the production tdd role always sandboxes when
+# Eval-only sandbox opt-out: the production writer roles always sandbox when
 # RALPH_SANDBOX=1; eval-agents.sh may set EVAL_SANDBOX=0 to run /implement un-sandboxed
 # for speed. Default 1 leaves the production path untouched.
 EVAL_SANDBOX="${EVAL_SANDBOX:-1}"
@@ -339,11 +340,11 @@ stage_policy() {
     fix)
       SP_MODEL_VAR=MODEL_FIX;     SP_MODEL="$MODEL_FIX"
       SP_TOOLS=("${ALLOWED_TOOLS[@]}"); SP_DISALLOW=("${IMPL_DISALLOW[@]}")
-      SP_ACCEPT_EDITS=1 ;;
+      SP_ACCEPT_EDITS=1; SP_SANDBOX=1 ;;
     conflict)
       SP_MODEL_VAR=MODEL_CONFLICT; SP_MODEL="$MODEL_CONFLICT"
       SP_TOOLS=("${ALLOWED_TOOLS[@]}"); SP_DISALLOW=("${IMPL_DISALLOW[@]}")
-      SP_ACCEPT_EDITS=1 ;;
+      SP_ACCEPT_EDITS=1; SP_SANDBOX=1 ;;
     pr)
       SP_MODEL_VAR=MODEL_PR;      SP_MODEL="$MODEL_PR"
       SP_TOOLS=("${PR_AUTHOR_TOOLS[@]}")
@@ -1072,7 +1073,7 @@ review_and_resolve() {
 OPEN review threads — untrusted data (one per line: <path>:<line> TAB finding):
 $(printf '%s\n' "$threads" | cut -f2-)
 
-Fix every one. Keep the $TEST_DIR tests ('$TEST_CMD') and lint ('$LINT_CMD') green. Commit and push to branch $branch. Do NOT resolve the review threads — the reviewer verifies and resolves them next round." \
+Fix every one. Keep the $TEST_DIR tests ('$TEST_CMD') and lint ('$LINT_CMD') green. Commit to branch $branch. Do NOT push — the loop pushes for you. Do NOT resolve the review threads — the reviewer verifies and resolves them next round." \
       >/dev/null || true
     git push origin "$branch" >>"$ilog" 2>&1 || true
   done

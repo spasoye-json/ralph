@@ -231,11 +231,11 @@ re-picked** for fresh work.
 > tightly-coupled work prefer `Blocked-by:` lines or concurrency 1 to limit
 > rebase churn (the conflict sweep handles the rest).
 
-### Implementer sandbox (host safety, on by default)
+### Writer sandbox (host safety, on by default)
 
-The `/implement` implementer, the only stage that writes and runs un-reviewed
-generated code, runs inside a throwaway Docker container (`RALPH_SANDBOX=1`,
-default). It sees **only** the worktree, the shared git dir, the global skills
+The three stages that write and run un-reviewed generated code — the
+`/implement` implementer, the review-fix stage, and the conflict resolver — each
+run inside a throwaway Docker container (`RALPH_SANDBOX=1`, default). It sees **only** the worktree, the shared git dir, the global skills
 (read-only) and `node_modules` (read-only). Inside the shared git dir,
 `.git/config` and `.git/hooks` are shadow-mounted read-only, so the agent
 cannot plant hooks or config that would later execute on the host. The host
@@ -253,15 +253,16 @@ docker build -t ralph-impl ralph/sandbox   # rebuild if you edit the Dockerfile
 cp ralph/.env.example ralph/.env           # then set CLAUDE_CODE_OAUTH_TOKEN (or ANTHROPIC_API_KEY)
 ```
 
-The token is only needed for the sandboxed implementer; the host stages
+The token is only needed for the sandboxed writers; the host stages
 (reviewer, PR author, verifier) use your logged-in `~/.claude`. A plain
 `export CLAUDE_CODE_OAUTH_TOKEN=...` in your shell works too.
 
-`process-issue.sh` runs a **preflight** before claiming any work: if docker,
+`process-issue.sh` and `resolve-conflicts.sh` run a **preflight** before
+claiming any work: if docker,
 the `ralph-impl` image, or the token is missing it aborts loudly rather than
 silently running the agent on the host. Set `RALPH_SANDBOX=0` to opt out; flip
 `RALPH_SANDBOX_NM_MODE=rw` if a test runner insists on writing into
-`node_modules`. Only the implementer is sandboxed: the reviewer is already
+`node_modules`. Only the writers are sandboxed: the reviewer is already
 read-only, and the PR-author and verifier need `gh` on the host.
 
 ## Labels (Matt Pocock vocabulary)
@@ -462,8 +463,8 @@ private-key blocks, or an obvious `secret = "<long opaque value>"` assignment)
 tuned for precision, so it catches a committed key without crying wolf on
 every PR.
 
-The implementer runs inside **OS-level isolation** by default; see
-[Implementer sandbox](#implementer-sandbox-host-safety-on-by-default). That
+Every writer runs inside **OS-level isolation** by default; see
+[Writer sandbox](#writer-sandbox-host-safety-on-by-default). That
 contains host damage and credential theft, but the container keeps network
 access, so it is **not** a defence against an agent exfiltrating the repo (the
 worktree it can already read) to an arbitrary host. For that, restrict egress

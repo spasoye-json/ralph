@@ -34,7 +34,7 @@ budget_start   # attempts: RALPH_MAX_ATTEMPTS, wall clock: RALPH_ISSUE_BUDGET
 # sandbox aborts cleanly instead of churning labels or (worse) silently running the
 # agent on the host. Opt out with RALPH_SANDBOX=0.
 if [ "${RALPH_SANDBOX:-0}" = "1" ]; then
-  sandbox_preflight || { log "#$n: implementer sandbox unavailable — aborting (set RALPH_SANDBOX=0 to run on host)"; exit 1; }
+  sandbox_preflight || { log "#$n: writer sandbox unavailable — aborting (set RALPH_SANDBOX=0 to run on host)"; exit 1; }
 fi
 
 # Claim the issue so a second invocation never double-picks it. Issues reach the
