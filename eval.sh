@@ -9,8 +9,8 @@
 # Run it before and after changing any guard/prompt logic:  ./ralph/eval.sh
 # Exit status is non-zero if any assertion fails (usable as a CI/pre-push gate).
 
-export RALPH_REQUIRE_ALLOWLIST=0   # tests pure functions; no allowlist to offer
-export RALPH_TRIM_MCP=0            # offline: never shell out to `claude --help` for the strict-mcp-config probe
+# Sourcing lib.sh is side-effect free; the effectful init (allowlist load, claude
+# probe, file writes) lives in ralph_init, which this harness never calls.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "$HERE/lib.sh"
@@ -132,10 +132,10 @@ printf '== stage policy (stage_policy) ==\n'
 # sp <role> <key> — print the value of one key=value line from stage_policy.
 sp() { stage_policy "$1" | grep -m1 "^$2=" | cut -d= -f2-; }
 
-# tdd is the sandboxed writer: sandbox on, edits accepted, IMPL_DISALLOW carried.
-[ "$(sp tdd sandbox)" = 1 ]                          && ok || bad "tdd sandbox=1"
-[ "$(sp tdd accept_edits)" = 1 ]                     && ok || bad "tdd accept_edits=1"
-printf '%s' "$(sp tdd disallow)" | grep -q 'gh pr merge' && ok || bad "tdd disallow carries IMPL_DISALLOW"
+# implement is the sandboxed writer: sandbox on, edits accepted, IMPL_DISALLOW carried.
+[ "$(sp implement sandbox)" = 1 ]                    && ok || bad "implement sandbox=1"
+[ "$(sp implement accept_edits)" = 1 ]               && ok || bad "implement accept_edits=1"
+printf '%s' "$(sp implement disallow)" | grep -q 'gh pr merge' && ok || bad "implement disallow carries IMPL_DISALLOW"
 
 # Readers (review, verify, rubric) accept no edits and hold no write tools.
 [ "$(sp review accept_edits)" = 0 ]                  && ok || bad "review accept_edits=0"
@@ -148,20 +148,21 @@ for r in review verify rubric; do
   printf '%s' "$t" | grep -q 'git push'    && bad "$r tools must not allow push"          || ok
 done
 
-# Every writer (tdd, fix, conflict) carries IMPL_DISALLOW + accepts edits.
-for w in tdd fix conflict; do
+# Every writer (implement, fix, conflict) carries IMPL_DISALLOW + accepts edits.
+for w in implement fix conflict; do
   printf '%s' "$(sp "$w" disallow)" | grep -q 'gh pr merge' && ok || bad "$w must carry IMPL_DISALLOW"
   [ "$(sp "$w" accept_edits)" = 1 ]                          && ok || bad "$w accept_edits=1"
+  [ "$(sp "$w" sandbox)" = 1 ]                               && ok || bad "$w sandbox=1"
 done
 
 # No role may drop the base capability boundary (INJECTION_GUARD).
-for r in tdd fix conflict pr review verify rubric; do
+for r in implement fix conflict pr review verify rubric; do
   [ "$(sp "$r" guard_has_base)" = 1 ] && ok || bad "$r must carry base INJECTION_GUARD"
 done
 
 # Role -> model-tier map: pin which MODEL_* var each stage runs on, so a config
 # drift (e.g. silently moving the reviewer onto the implementer's tier) is caught.
-[ "$(sp tdd model_var)" = MODEL_TDD ]           && ok || bad "tdd -> MODEL_TDD"
+[ "$(sp implement model_var)" = MODEL_IMPLEMENT ] && ok || bad "implement -> MODEL_IMPLEMENT"
 [ "$(sp fix model_var)" = MODEL_FIX ]           && ok || bad "fix -> MODEL_FIX"
 [ "$(sp conflict model_var)" = MODEL_CONFLICT ] && ok || bad "conflict -> MODEL_CONFLICT"
 [ "$(sp pr model_var)" = MODEL_PR ]             && ok || bad "pr -> MODEL_PR"
@@ -171,6 +172,139 @@ done
 
 # Unknown role fails loudly (fail-safe, like parse_verdict).
 if stage_policy bogus-role >/dev/null 2>&1; then bad "unknown role must fail"; else ok; fi
+
+# --- 9. review outcome classifier -------------------------------------------------
+# Pin the pure decision half of review_and_resolve (the same classifier/adapter
+# split as classify_pr): threads > gate > secret > approved, failing safe on an
+# unreadable thread count.
+printf '== review outcome (review_outcome) ==\n'
+[ "$(review_outcome 1 0 1 1)" = approved ]  && ok || bad "clean review + gate + scan -> approved"
+[ "$(review_outcome 0 0 1 1)" = threads ]   && ok || bad "inconclusive review -> threads (never approve on a crashed reviewer)"
+[ "$(review_outcome 1 3 1 1)" = threads ]   && ok || bad "open threads -> threads"
+[ "$(review_outcome 1 0 0 1)" = gate ]      && ok || bad "red gate -> gate"
+[ "$(review_outcome 1 0 1 0)" = secret ]    && ok || bad "leaked secret -> secret"
+[ "$(review_outcome 1 '' 1 1)" = threads ]  && ok || bad "unreadable thread count fails safe -> threads"
+[ "$(review_outcome 1 3 0 0)" = threads ]   && ok || bad "threads win over gate/secret (precedence)"
+
+# --- 10. retry budget --------------------------------------------------------------
+# Pin the shared return protocol (0 keep going, 1 attempt cap, 3 infra strikes,
+# 4 wall clock) that every AFK retry loop routes on.
+printf '== retry budget (budget_*) ==\n'
+budget_start 2 0
+budget_attempt; [ "$?" = 0 ]  && ok || bad "attempt 1/2 keeps going"
+budget_attempt; [ "$?" = 1 ]  && ok || bad "attempt 2/2 returns 1 (cap)"
+budget_start 0 0
+budget_attempt; budget_attempt; budget_attempt
+[ "$?" = 0 ]                  && ok || bad "max_attempts=0 is unlimited"
+[ "$(budget_attempts)" = 3 ]  && ok || bad "attempts counted (got $(budget_attempts))"
+budget_start 3 0
+budget_charge 3; [ "$?" = 1 ] && ok || bad "charge k cycles hits the cap"
+budget_start 0 0
+RALPH_INFRA_RETRIES=2 budget_strike; [ "$?" = 0 ] && ok || bad "strike 1/2 keeps going"
+RALPH_INFRA_RETRIES=2 budget_strike; [ "$?" = 3 ] && ok || bad "strike 2/2 returns 3 (infra)"
+budget_strike_reset
+RALPH_INFRA_RETRIES=2 budget_strike; [ "$?" = 0 ] && ok || bad "strike streak resets on progress"
+budget_start 5 0
+budget_check; [ "$?" = 0 ]    && ok || bad "fresh budget checks clean"
+
+# --- 10b. toolchain-agnostic gate wiring ---------------------------------------
+# Ralph shells out to config.sh commands and assumes no toolchain. Pin the two
+# pure deciders so a node assumption cannot creep back in.
+printf '== gate wiring (gate_cmds_text, needs_setup) ==\n'
+(
+  LINT_CMD="npm run lint"; TEST_CMD="npm test"
+  [ "$(gate_cmds_text)" = "'npm run lint' and 'npm test'" ] && exit 0 || exit 1
+) && ok || bad "gate_cmds_text joins both commands"
+( LINT_CMD=""; TEST_CMD="go test ./..."; [ "$(gate_cmds_text)" = "'go test ./...'" ] ) \
+  && ok || bad "gate_cmds_text drops an empty LINT_CMD"
+( LINT_CMD="cargo clippy"; TEST_CMD=""; [ "$(gate_cmds_text)" = "'cargo clippy'" ] ) \
+  && ok || bad "gate_cmds_text drops an empty TEST_CMD"
+( LINT_CMD=""; TEST_CMD=""; printf '%s' "$(gate_cmds_text)" | grep -q "''" ) \
+  && bad "gate_cmds_text must not emit empty quotes when both are unset" || ok
+
+sfix="$(mktemp -d)"
+(
+  cd "$sfix" || exit 1
+  SETUP_CMD=""; SETUP_MARKER=""; SETUP_LOCK=""
+  needs_setup && exit 1                                  # no SETUP_CMD: never
+  SETUP_CMD="npm ci"
+  needs_setup || exit 1                                  # no marker: always
+  SETUP_MARKER="deps"
+  needs_setup || exit 1                                  # marker missing
+  mkdir -p deps
+  needs_setup || exit 1                                  # marker EMPTY (docker mountpoint)
+  touch deps/installed
+  needs_setup && exit 1                                  # marker populated
+  SETUP_LOCK="lock"; touch lock
+  needs_setup || exit 1                                  # lock newer than marker
+  touch deps
+  needs_setup && exit 1                                  # marker newer than lock
+  exit 0
+) && ok || bad "needs_setup: marker/lock staleness rules"
+rm -rf "$sfix"
+
+# No entry point may hardcode a toolchain: every command comes from config.sh.
+for f in "$HERE"/lib.sh "$HERE"/process-issue.sh "$HERE"/run.sh "$HERE"/resolve-conflicts.sh; do
+  grep -nE '(^|[^A-Za-z_-])(npm|npx|yarn|pnpm|cargo|bundle|pytest|gradlew)([^A-Za-z_-]|$)' "$f" \
+    | grep -v '^[0-9]*:[[:space:]]*#' | grep -q . \
+    && bad "$(basename "$f") hardcodes a toolchain command outside a comment" || ok
+done
+
+# --- 11. metrics outcome vocabulary -------------------------------------------------
+# Pin the one outcome enum record_metric validates and status.sh iterates.
+printf '== outcome vocabulary (metric_outcome_valid) ==\n'
+for o in approved handback verify-fail implement-error test-fail pr-failed escalated \
+         secret-detected ci-fail conflict-unresolved budget-exceeded; do
+  metric_outcome_valid "$o" && ok || bad "outcome '$o' must be in RALPH_OUTCOMES"
+done
+metric_outcome_valid bogus-outcome && bad "unknown outcome must be invalid" || ok
+
+# Pin the readers against a fixture CSV — no network, no live metrics file.
+mfix="$(mktemp)"
+printf '%s\n' \
+  '2026-01-01T00:00:00Z,1,approved,2,600,' \
+  '2026-01-02T00:00:00Z,2,handback,3,,review did not converge' \
+  '2026-01-03T00:00:00Z,3,approved,1,300,' > "$mfix"
+metrics_summary "$mfix" | grep -q 'total rows: 3'                    && ok || bad "metrics_summary row count"
+metrics_summary "$mfix" | grep -q 'approval rate: 66.7%'             && ok || bad "metrics_summary approval rate"
+[ "$(metrics_recent 1 "$mfix")" = '2026-01-03T00:00:00Z,3,approved,1,300,' ] && ok || bad "metrics_recent tail"
+metrics_handbacks 10 "$mfix" | grep -q 'review did not converge'     && ok || bad "metrics_handbacks reason"
+rm -f "$mfix"
+
+# --- 12. approve_pr marker idempotency (stubbed gh) --------------------------------
+# The second adapter at the gh seam: a PATH-stubbed gh serving canned reads and
+# recording writes, still offline. Pins the regression this repo already shipped
+# once: approve_pr must read the approval marker through pr_fields (comments from
+# the END) and must NOT post a duplicate marker when one is present.
+printf '== approve_pr marker idempotency (stubbed gh) ==\n'
+stubd="$(mktemp -d)"
+cat > "$stubd/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "pr view")
+    case "$*" in
+      *"--json number"*) echo 42 ;;
+      *"--json title"*)  echo "feat: x" ;;
+    esac ;;
+  "pr comment") echo "comment $*" >> "$GH_STUB_LOG" ;;
+  "api graphql")
+    if [ "${GH_STUB_MARKER:-0}" = 1 ]; then
+      printf '{"data":{"repository":{"pullRequest":{"isDraft":false,"title":"feat: x","comments":{"nodes":[{"body":"%s — all done","createdAt":"2026-01-01T00:00:00Z"}]},"commits":{"nodes":[{"commit":{"committedDate":"2025-12-31T00:00:00Z"}}]}}}}}' "$APPROVAL_MARKER"
+    else
+      printf '{"data":{"repository":{"pullRequest":{"isDraft":false,"title":"feat: x","comments":{"nodes":[]},"commits":{"nodes":[{"commit":{"committedDate":"2025-12-31T00:00:00Z"}}]}}}}}'
+    fi ;;
+  *) : ;;
+esac
+STUB
+chmod +x "$stubd/gh"
+export APPROVAL_MARKER GH_STUB_LOG="$stubd/writes.log"
+: > "$GH_STUB_LOG"
+PATH="$stubd:$PATH" GH_STUB_MARKER=1 approve_pr "https://example/pr/42" 7 /dev/null
+[ ! -s "$GH_STUB_LOG" ] && ok || bad "approve_pr must NOT re-post an existing approval marker"
+: > "$GH_STUB_LOG"
+PATH="$stubd:$PATH" GH_STUB_MARKER=0 approve_pr "https://example/pr/42" 7 /dev/null
+grep -q '^comment' "$GH_STUB_LOG" && ok || bad "approve_pr must post the marker when absent"
+rm -rf "$stubd"
 
 # --- summary --------------------------------------------------------------------
 printf '\n== eval: %d passed, %d failed ==\n' "$PASS" "$FAIL"
