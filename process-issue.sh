@@ -72,12 +72,12 @@ cd "$wt"
 # capturing its exit code in IMPL_RC. build_until_green calls this repeatedly
 # until green.
 run_impl_here() {
-  # The tdd role's full policy bag — model, allowlist, IMPL_DISALLOW, acceptEdits,
+  # The implement role's full policy bag — model, allowlist, IMPL_DISALLOW, acceptEdits,
   # guard AND the docker sandbox + MCP-trim blanking — is resolved inside run_stage
   # (the sandbox shadow stays confined there, so later host stages keep bare claude).
   # cwd is the worktree (we cd'd in above), which run_stage mounts as the container
   # worktree. Keep the exit code: the gate below tells an infra crash from a no-op.
-  run_stage tdd "$n" "$ilog" "/implement #$n
+  run_stage implement "$n" "$ilog" "/implement #$n
 
 Implement GitHub issue #$n. Work only within this worktree.
 The full issue is included below — work from it directly; do not call gh or fetch
@@ -162,7 +162,7 @@ route_build_rc() {
   local rc="$1" cap_outcome="$2" phase="$3"
   case "$rc" in
     0) return 0 ;;
-    3) stop_issue tdd-error 3 "/implement crashed with no commits ${RALPH_INFRA_RETRIES}x $phase (infra error; see issue-$n.log)" ;;
+    3) stop_issue implement-error 3 "/implement crashed with no commits ${RALPH_INFRA_RETRIES}x $phase (infra error; see issue-$n.log)" ;;
     4) stop_issue budget-exceeded 1 "wall-clock budget RALPH_ISSUE_BUDGET=${RALPH_ISSUE_BUDGET}s exceeded $phase — re-queued" ;;
     6) stop_issue escalated 6 "implementer escalated: $(read_escalation "$PWD")" ;;
     *) stop_issue "$cap_outcome" 1 "attempt cap RALPH_MAX_ATTEMPTS=${RALPH_MAX_ATTEMPTS} reached $phase" ;;

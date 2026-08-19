@@ -48,7 +48,7 @@ AGENT_TIMEOUT="${AGENT_TIMEOUT:-3600}"         # seconds before a single claude 
 # Per-stage models (Claude CLI --model alias or full ID; empty ⇒ CLI default).
 # Two models only: Opus 5 writes (implement, fix, conflict, PR body), Fable 5
 # judges (review, verify). Override per stage via env if you must.
-MODEL_TDD="${MODEL_TDD:-claude-opus-5}"           # implementation
+MODEL_IMPLEMENT="${MODEL_IMPLEMENT:-claude-opus-5}"     # implementation
 MODEL_REVIEW="${MODEL_REVIEW:-claude-fable-5}"    # quality review
 MODEL_VERIFY="${MODEL_VERIFY:-$MODEL_REVIEW}"     # correctness/red-team verification (default: same as MODEL_REVIEW)
 MODEL_FIX="${MODEL_FIX:-claude-opus-5}"           # apply review fixes
@@ -320,7 +320,7 @@ sandbox_impl_cmd() {
 # eval.sh consumes the stable key=value lines it prints. No network, no agent — so
 # the eval harness can pin the whole role→policy table offline.
 #
-# role ∈ tdd|fix|conflict|pr|review|verify|rubric
+# role ∈ implement|fix|conflict|pr|review|verify|rubric
 #
 # Sets these globals (the "bag"): SP_MODEL_VAR, SP_MODEL, SP_TOOLS[], SP_DISALLOW[],
 # SP_ACCEPT_EDITS (0|1), SP_GUARD, SP_SANDBOX (0|1).
@@ -333,8 +333,8 @@ stage_policy() {
   SP_MODEL_VAR=""; SP_MODEL=""; SP_TOOLS=(); SP_DISALLOW=()
   SP_ACCEPT_EDITS=0; SP_GUARD="$INJECTION_GUARD"; SP_SANDBOX=0
   case "$role" in
-    tdd)
-      SP_MODEL_VAR=MODEL_TDD;     SP_MODEL="$MODEL_TDD"
+    implement)
+      SP_MODEL_VAR=MODEL_IMPLEMENT; SP_MODEL="$MODEL_IMPLEMENT"
       SP_TOOLS=("${ALLOWED_TOOLS[@]}"); SP_DISALLOW=("${IMPL_DISALLOW[@]}")
       SP_ACCEPT_EDITS=1; SP_SANDBOX=1 ;;
     fix)
@@ -398,9 +398,10 @@ claude_run() {
 # propagate through claude_run's PIPESTATUS[0] return.
 #
 # stdout disposition stays at the CALL SITE: verify/rubric capture with $(...);
-# tdd/fix/conflict/pr/review append >/dev/null.
+# implement/fix/conflict/pr/review append >/dev/null.
 #
-# tdd precondition: cwd must be the worktree root (callers cd there) — the sandbox
+# Writer precondition (implement, fix, conflict): cwd must be the worktree root
+# (callers cd there) — the sandbox
 # mounts $PWD as the container worktree.
 run_stage() {
   local role="$1" issue="$2" logf="$3" prompt="$4"
@@ -408,7 +409,7 @@ run_stage() {
   local MODEL_ARGS=()
   [ -n "$SP_MODEL" ] && MODEL_ARGS=(--model "$SP_MODEL")
 
-  # Sandbox shadow for the tdd writer, confined to this call: sandbox_impl_cmd
+  # Sandbox shadow for the writer roles, confined to this call: sandbox_impl_cmd
   # fills the local CLAUDE_CMD copy, so later host stages keep bare claude. The
   # MCP-trim is blanked because its config file (ralph/logs) isn't mounted in the
   # container, so --mcp-config would point at an unreachable path. EVAL_SANDBOX
@@ -441,7 +442,7 @@ run_stage() {
 # The outcome vocabulary. The ONE list every writer validates against and the
 # dashboard iterates — it used to live in a comment here and be restated as an awk
 # literal in status.sh, and the two drifted (commit f0e06af).
-RALPH_OUTCOMES=(approved handback verify-fail no-commits tdd-error test-fail
+RALPH_OUTCOMES=(approved handback verify-fail no-commits implement-error test-fail
                 pr-failed escalated secret-detected ci-fail conflict-unresolved
                 budget-exceeded)
 

@@ -99,7 +99,7 @@ cannot clear:
 - **Leaked secret** in the diff (safety: merging one is unrecoverable).
 - **Repeated `/implement` crash** with no commits (`RALPH_INFRA_RETRIES`,
   default 3), meaning a broken sandbox, skill, or auth. Surfaced as
-  `tdd-error` and caught by the infra circuit breaker.
+  `implement-error` and caught by the infra circuit breaker.
 - **Explicit escalation**: the implementer may decline an issue that is too
   underspecified or contradictory to implement responsibly by writing the
   `.ralph-needs-human` sentinel (first line = the blocker) instead of forcing
@@ -203,7 +203,7 @@ recent approvals, i.e. is the loop needing fewer review rounds over time?).
 A **circuit breaker** stops the loop if a systemic problem starts burning
 budget. Two thresholds, both reset by an approval: `RALPH_MAX_INFRA_ERRORS`
 (default 2; 0 disables) trips fast on consecutive **infra errors**, meaning a
-`/implement` that crashed before any commit (`tdd-error`), e.g. a broken
+`/implement` that crashed before any commit (`implement-error`), e.g. a broken
 sandbox, skill, or auth; and `RALPH_MAX_HANDBACKS` (default 6; 0 disables)
 trips on any consecutive handbacks.
 
@@ -342,7 +342,7 @@ AGENT_TIMEOUT=7200  ./ralph/run.sh     # allow 2h per agent (default 3600 = 1h)
 BASE_BRANCH=develop ./ralph/run.sh     # default main (set in config.sh)
 
 # per-stage models (CLI --model alias or full ID; empty = your CLI default)
-MODEL_TDD=claude-opus-5    ./ralph/run.sh   # implementation (default claude-opus-5)
+MODEL_IMPLEMENT=claude-opus-5 ./ralph/run.sh # implementation (default claude-opus-5)
 MODEL_REVIEW=claude-fable-5 ./ralph/run.sh  # quality review (default claude-fable-5)
 MODEL_FIX=claude-opus-5    ./ralph/run.sh   # apply review fixes (default claude-opus-5)
 MODEL_CONFLICT=claude-opus-5 ./ralph/run.sh # resolve rebase conflicts (default claude-opus-5)

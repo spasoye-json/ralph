@@ -132,10 +132,10 @@ printf '== stage policy (stage_policy) ==\n'
 # sp <role> <key> — print the value of one key=value line from stage_policy.
 sp() { stage_policy "$1" | grep -m1 "^$2=" | cut -d= -f2-; }
 
-# tdd is the sandboxed writer: sandbox on, edits accepted, IMPL_DISALLOW carried.
-[ "$(sp tdd sandbox)" = 1 ]                          && ok || bad "tdd sandbox=1"
-[ "$(sp tdd accept_edits)" = 1 ]                     && ok || bad "tdd accept_edits=1"
-printf '%s' "$(sp tdd disallow)" | grep -q 'gh pr merge' && ok || bad "tdd disallow carries IMPL_DISALLOW"
+# implement is the sandboxed writer: sandbox on, edits accepted, IMPL_DISALLOW carried.
+[ "$(sp implement sandbox)" = 1 ]                    && ok || bad "implement sandbox=1"
+[ "$(sp implement accept_edits)" = 1 ]               && ok || bad "implement accept_edits=1"
+printf '%s' "$(sp implement disallow)" | grep -q 'gh pr merge' && ok || bad "implement disallow carries IMPL_DISALLOW"
 
 # Readers (review, verify, rubric) accept no edits and hold no write tools.
 [ "$(sp review accept_edits)" = 0 ]                  && ok || bad "review accept_edits=0"
@@ -148,21 +148,21 @@ for r in review verify rubric; do
   printf '%s' "$t" | grep -q 'git push'    && bad "$r tools must not allow push"          || ok
 done
 
-# Every writer (tdd, fix, conflict) carries IMPL_DISALLOW + accepts edits.
-for w in tdd fix conflict; do
+# Every writer (implement, fix, conflict) carries IMPL_DISALLOW + accepts edits.
+for w in implement fix conflict; do
   printf '%s' "$(sp "$w" disallow)" | grep -q 'gh pr merge' && ok || bad "$w must carry IMPL_DISALLOW"
   [ "$(sp "$w" accept_edits)" = 1 ]                          && ok || bad "$w accept_edits=1"
   [ "$(sp "$w" sandbox)" = 1 ]                               && ok || bad "$w sandbox=1"
 done
 
 # No role may drop the base capability boundary (INJECTION_GUARD).
-for r in tdd fix conflict pr review verify rubric; do
+for r in implement fix conflict pr review verify rubric; do
   [ "$(sp "$r" guard_has_base)" = 1 ] && ok || bad "$r must carry base INJECTION_GUARD"
 done
 
 # Role -> model-tier map: pin which MODEL_* var each stage runs on, so a config
 # drift (e.g. silently moving the reviewer onto the implementer's tier) is caught.
-[ "$(sp tdd model_var)" = MODEL_TDD ]           && ok || bad "tdd -> MODEL_TDD"
+[ "$(sp implement model_var)" = MODEL_IMPLEMENT ] && ok || bad "implement -> MODEL_IMPLEMENT"
 [ "$(sp fix model_var)" = MODEL_FIX ]           && ok || bad "fix -> MODEL_FIX"
 [ "$(sp conflict model_var)" = MODEL_CONFLICT ] && ok || bad "conflict -> MODEL_CONFLICT"
 [ "$(sp pr model_var)" = MODEL_PR ]             && ok || bad "pr -> MODEL_PR"
@@ -210,7 +210,7 @@ budget_check; [ "$?" = 0 ]    && ok || bad "fresh budget checks clean"
 # --- 11. metrics outcome vocabulary -------------------------------------------------
 # Pin the one outcome enum record_metric validates and status.sh iterates.
 printf '== outcome vocabulary (metric_outcome_valid) ==\n'
-for o in approved handback verify-fail tdd-error test-fail pr-failed escalated \
+for o in approved handback verify-fail implement-error test-fail pr-failed escalated \
          secret-detected ci-fail conflict-unresolved budget-exceeded; do
   metric_outcome_valid "$o" && ok || bad "outcome '$o' must be in RALPH_OUTCOMES"
 done

@@ -80,11 +80,11 @@ run_case() {
   fi
 
   ( cd "$wt" || exit 1
-    # Reuse the production tdd role so the implementer here gets the SAME policy
+    # Reuse the production implement role so the implementer here gets the SAME policy
     # bag — crucially the docker sandbox (run_stage sandboxes the implementer by
     # construction when RALPH_SANDBOX=1), closing the old eval-vs-production
     # divergence. Set EVAL_SANDBOX=0 to skip the sandbox for speed.
-    run_stage tdd "$slug" "$log" "/implement
+    run_stage implement "$slug" "$log" "/implement
 
 $C_TITLE
 
