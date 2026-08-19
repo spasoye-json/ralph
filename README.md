@@ -100,6 +100,11 @@ cannot clear:
 - **Repeated `/implement` crash** with no commits (`RALPH_INFRA_RETRIES`,
   default 3), meaning a broken sandbox, skill, or auth. Surfaced as
   `tdd-error` and caught by the infra circuit breaker.
+- **Explicit escalation**: the implementer may decline an issue that is too
+  underspecified or contradictory to implement responsibly by writing the
+  `.ralph-needs-human` sentinel (first line = the blocker) instead of forcing
+  a bad PR. Surfaced as `escalated` and labeled `ready-for-human` — a clean
+  escalation beats a confident wrong answer.
 - **Unresolvable rebase conflict** or unfixable post-rebase review, in the
   rare maintenance path (`resolve-conflicts.sh`). It runs inside the sweep and
   can't block forever, so it bounds its retries then hands back.
@@ -189,7 +194,8 @@ serialized by a `flock`. Concurrency is gated by your Claude API rate and
 token limits, **not CPU**; raise it with care.
 
 Each finished issue appends a **metrics row** (`METRICS_FILE`:
-`timestamp,issue,outcome,cycles,duration`); run **`ralph/status.sh`** for a
+`timestamp,issue,outcome,cycles,duration,reason`; the outcome vocabulary is
+the `RALPH_OUTCOMES` array in `lib.sh`); run **`ralph/status.sh`** for a
 live snapshot: queue label counts, open `issue/*` PRs, throughput (approval
 rate, avg cycles, avg duration), and a **review-convergence** trend (older vs
 recent approvals, i.e. is the loop needing fewer review rounds over time?).

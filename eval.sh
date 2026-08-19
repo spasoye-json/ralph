@@ -9,8 +9,8 @@
 # Run it before and after changing any guard/prompt logic:  ./ralph/eval.sh
 # Exit status is non-zero if any assertion fails (usable as a CI/pre-push gate).
 
-export RALPH_REQUIRE_ALLOWLIST=0   # tests pure functions; no allowlist to offer
-export RALPH_TRIM_MCP=0            # offline: never shell out to `claude --help` for the strict-mcp-config probe
+# Sourcing lib.sh is side-effect free; the effectful init (allowlist load, claude
+# probe, file writes) lives in ralph_init, which this harness never calls.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "$HERE/lib.sh"
@@ -171,6 +171,96 @@ done
 
 # Unknown role fails loudly (fail-safe, like parse_verdict).
 if stage_policy bogus-role >/dev/null 2>&1; then bad "unknown role must fail"; else ok; fi
+
+# --- 9. review outcome classifier -------------------------------------------------
+# Pin the pure decision half of review_and_resolve (the same classifier/adapter
+# split as classify_pr): threads > gate > secret > approved, failing safe on an
+# unreadable thread count.
+printf '== review outcome (review_outcome) ==\n'
+[ "$(review_outcome 1 0 1 1)" = approved ]  && ok || bad "clean review + gate + scan -> approved"
+[ "$(review_outcome 0 0 1 1)" = threads ]   && ok || bad "inconclusive review -> threads (never approve on a crashed reviewer)"
+[ "$(review_outcome 1 3 1 1)" = threads ]   && ok || bad "open threads -> threads"
+[ "$(review_outcome 1 0 0 1)" = gate ]      && ok || bad "red gate -> gate"
+[ "$(review_outcome 1 0 1 0)" = secret ]    && ok || bad "leaked secret -> secret"
+[ "$(review_outcome 1 '' 1 1)" = threads ]  && ok || bad "unreadable thread count fails safe -> threads"
+[ "$(review_outcome 1 3 0 0)" = threads ]   && ok || bad "threads win over gate/secret (precedence)"
+
+# --- 10. retry budget --------------------------------------------------------------
+# Pin the shared return protocol (0 keep going, 1 attempt cap, 3 infra strikes,
+# 4 wall clock) that every AFK retry loop routes on.
+printf '== retry budget (budget_*) ==\n'
+budget_start 2 0
+budget_attempt; [ "$?" = 0 ]  && ok || bad "attempt 1/2 keeps going"
+budget_attempt; [ "$?" = 1 ]  && ok || bad "attempt 2/2 returns 1 (cap)"
+budget_start 0 0
+budget_attempt; budget_attempt; budget_attempt
+[ "$?" = 0 ]                  && ok || bad "max_attempts=0 is unlimited"
+[ "$(budget_attempts)" = 3 ]  && ok || bad "attempts counted (got $(budget_attempts))"
+budget_start 3 0
+budget_charge 3; [ "$?" = 1 ] && ok || bad "charge k cycles hits the cap"
+budget_start 0 0
+RALPH_INFRA_RETRIES=2 budget_strike; [ "$?" = 0 ] && ok || bad "strike 1/2 keeps going"
+RALPH_INFRA_RETRIES=2 budget_strike; [ "$?" = 3 ] && ok || bad "strike 2/2 returns 3 (infra)"
+budget_strike_reset
+RALPH_INFRA_RETRIES=2 budget_strike; [ "$?" = 0 ] && ok || bad "strike streak resets on progress"
+budget_start 5 0
+budget_check; [ "$?" = 0 ]    && ok || bad "fresh budget checks clean"
+
+# --- 11. metrics outcome vocabulary -------------------------------------------------
+# Pin the one outcome enum record_metric validates and status.sh iterates.
+printf '== outcome vocabulary (metric_outcome_valid) ==\n'
+for o in approved handback verify-fail tdd-error test-fail pr-failed escalated \
+         secret-detected ci-fail conflict-unresolved budget-exceeded; do
+  metric_outcome_valid "$o" && ok || bad "outcome '$o' must be in RALPH_OUTCOMES"
+done
+metric_outcome_valid bogus-outcome && bad "unknown outcome must be invalid" || ok
+
+# Pin the readers against a fixture CSV — no network, no live metrics file.
+mfix="$(mktemp)"
+printf '%s\n' \
+  '2026-01-01T00:00:00Z,1,approved,2,600,' \
+  '2026-01-02T00:00:00Z,2,handback,3,,review did not converge' \
+  '2026-01-03T00:00:00Z,3,approved,1,300,' > "$mfix"
+metrics_summary "$mfix" | grep -q 'total rows: 3'                    && ok || bad "metrics_summary row count"
+metrics_summary "$mfix" | grep -q 'approval rate: 66.7%'             && ok || bad "metrics_summary approval rate"
+[ "$(metrics_recent 1 "$mfix")" = '2026-01-03T00:00:00Z,3,approved,1,300,' ] && ok || bad "metrics_recent tail"
+metrics_handbacks 10 "$mfix" | grep -q 'review did not converge'     && ok || bad "metrics_handbacks reason"
+rm -f "$mfix"
+
+# --- 12. approve_pr marker idempotency (stubbed gh) --------------------------------
+# The second adapter at the gh seam: a PATH-stubbed gh serving canned reads and
+# recording writes, still offline. Pins the regression this repo already shipped
+# once: approve_pr must read the approval marker through pr_fields (comments from
+# the END) and must NOT post a duplicate marker when one is present.
+printf '== approve_pr marker idempotency (stubbed gh) ==\n'
+stubd="$(mktemp -d)"
+cat > "$stubd/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "pr view")
+    case "$*" in
+      *"--json number"*) echo 42 ;;
+      *"--json title"*)  echo "feat: x" ;;
+    esac ;;
+  "pr comment") echo "comment $*" >> "$GH_STUB_LOG" ;;
+  "api graphql")
+    if [ "${GH_STUB_MARKER:-0}" = 1 ]; then
+      printf '{"data":{"repository":{"pullRequest":{"isDraft":false,"title":"feat: x","comments":{"nodes":[{"body":"%s — all done","createdAt":"2026-01-01T00:00:00Z"}]},"commits":{"nodes":[{"commit":{"committedDate":"2025-12-31T00:00:00Z"}}]}}}}}' "$APPROVAL_MARKER"
+    else
+      printf '{"data":{"repository":{"pullRequest":{"isDraft":false,"title":"feat: x","comments":{"nodes":[]},"commits":{"nodes":[{"commit":{"committedDate":"2025-12-31T00:00:00Z"}}]}}}}}'
+    fi ;;
+  *) : ;;
+esac
+STUB
+chmod +x "$stubd/gh"
+export APPROVAL_MARKER GH_STUB_LOG="$stubd/writes.log"
+: > "$GH_STUB_LOG"
+PATH="$stubd:$PATH" GH_STUB_MARKER=1 approve_pr "https://example/pr/42" 7 /dev/null
+[ ! -s "$GH_STUB_LOG" ] && ok || bad "approve_pr must NOT re-post an existing approval marker"
+: > "$GH_STUB_LOG"
+PATH="$stubd:$PATH" GH_STUB_MARKER=0 approve_pr "https://example/pr/42" 7 /dev/null
+grep -q '^comment' "$GH_STUB_LOG" && ok || bad "approve_pr must post the marker when absent"
+rm -rf "$stubd"
 
 # --- summary --------------------------------------------------------------------
 printf '\n== eval: %d passed, %d failed ==\n' "$PASS" "$FAIL"

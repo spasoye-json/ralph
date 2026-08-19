@@ -25,6 +25,7 @@
 #   EVAL_WT_ROOT      where eval worktrees are created (default: WORKTREE_ROOT)
 
 source "$(dirname "$0")/lib.sh"
+ralph_init
 set +e +o pipefail   # a single fixture failing must not abort the whole run
 
 CASES_DIR="$RALPH_DIR/eval/agent-cases"
@@ -73,9 +74,7 @@ run_case() {
   wt="$EVAL_WT_ROOT/eval-wt-$slug"
   log="$LOG_DIR/eval-$slug.log"; : > "$log"
 
-  git worktree prune 2>/dev/null
-  [ -e "$wt" ] && { git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"; }
-  if ! git worktree add --detach "$wt" "$EVAL_BASE" >>"$log" 2>&1; then
+  if ! worktree_enter "$wt" --detach "" "$EVAL_BASE" "$log"; then
     printf '  %-22s WORKTREE-FAIL (see %s)\n' "$slug" "$log"
     LAST_GATE=worktree-fail; LAST_RUBRIC="-"; return 1
   fi
@@ -130,7 +129,7 @@ SCORE: <integer 0-100>")"
   printf '  %-22s gate=%-8s (expect %-8s) rubric=%-3s\n' \
     "$slug" "$gate" "$C_EXPECT" "$rubric"
 
-  git worktree remove --force "$wt" >>"$log" 2>&1 || rm -rf "$wt"
+  worktree_leave "$wt"
   return "$ok_gate"
 }
 

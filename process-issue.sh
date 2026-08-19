@@ -21,14 +21,14 @@
 # Run from the repo root; gh + claude must be on PATH.
 
 source "$(dirname "$0")/lib.sh"
+ralph_init
 
 n="${1:?usage: process-issue.sh <issue-number>}"
 branch="issue/$n"
 wt="$WORKTREE_ROOT/wt-$n"
 mkdir -p "$LOG_DIR"
 ilog="$LOG_DIR/issue-$n.log"
-START_TS="$(date +%s)"
-elapsed() { echo $(( $(date +%s) - START_TS )); }
+budget_start   # attempts: RALPH_MAX_ATTEMPTS, wall clock: RALPH_ISSUE_BUDGET
 
 # Verify the implementer sandbox is usable before claiming work, so a misconfigured
 # sandbox aborts cleanly instead of churning labels or (worse) silently running the
@@ -39,49 +39,32 @@ fi
 
 # Claim the issue so a second invocation never double-picks it. Issues reach the
 # queue already triaged by hand, so there is no pre-flight readiness gate here.
-gh issue edit "$n" --add-label "$WORKING_LABEL" --remove-label "$READY_LABEL" >/dev/null
+issue_claim "$n"
 
 OLDPWD_ROOT="$PWD"
 cleanup() {
   cd "$OLDPWD_ROOT" 2>/dev/null || true
-  git worktree remove --force "$wt" 2>/dev/null || true
-  # Once the worktree is gone the branch is no longer checked out and is always
-  # recreatable from origin, so drop the local branch — otherwise every processed
-  # issue leaves an issue/* branch behind and they pile up indefinitely.
-  git branch -D "$branch" 2>/dev/null || true
+  worktree_leave "$wt" "$branch"
 }
 trap cleanup EXIT
 
-# Serialize ref/worktree setup so parallel issues (RALPH_CONCURRENCY>1) don't race
-# git's ref/worktree locks. The long agent work below runs unlocked, in parallel.
-exec 7>"$LOG_DIR/.worktree.lock"; flock 7
-
-# Defensive: an interrupted prior run can leave a stale worktree dir/branch that
-# makes 'git worktree add -b' fail. Clear them, unless an open PR needs the branch.
-git worktree prune
-if [ -e "$wt" ]; then
-  git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
-fi
-if git show-ref --quiet "refs/heads/$branch"; then
-  if [ -n "$(gh pr list --head "$branch" --state open --json number -q '.[].number' 2>/dev/null)" ]; then
-    log "#$n: $branch already has an open PR — skipping to avoid clobbering it"
-    gh issue edit "$n" --remove-label "$WORKING_LABEL" --add-label "$HUMAN_LABEL" >/dev/null
-    exit 1
-  fi
-  git branch -D "$branch" >/dev/null 2>&1 || true
-fi
-
-# Refresh the base from origin so the worktree branches from the latest master,
-# not a stale local ref. Abort rather than silently building on a stale base.
-if ! git fetch origin "$BASE_BRANCH" >>"$ilog" 2>&1; then
-  log "#$n: 'git fetch origin $BASE_BRANCH' failed — aborting to avoid a stale base"
-  gh issue edit "$n" --remove-label "$WORKING_LABEL" --add-label "$HUMAN_LABEL" >/dev/null
+# Never clobber a branch that already carries an open PR (worktree_enter -b would
+# delete and recreate it).
+if git show-ref --quiet "refs/heads/$branch" && has_open_pr "$n"; then
+  log "#$n: $branch already has an open PR — skipping to avoid clobbering it"
+  issue_release "$n" "$HUMAN_LABEL"
   exit 1
 fi
 
+# worktree_enter fetches origin/$BASE_BRANCH first so the worktree branches from
+# the latest master, not a stale local ref, and fails rather than silently
+# building on a stale base.
 log "#$n: creating worktree $wt on $branch (from origin/$BASE_BRANCH)"
-git worktree add -b "$branch" "$wt" "origin/$BASE_BRANCH" >>"$ilog" 2>&1
-flock -u 7   # ref setup done; release so other parallel issues can set up
+if ! worktree_enter "$wt" -b "$branch" "origin/$BASE_BRANCH" "$ilog" "$BASE_BRANCH"; then
+  log "#$n: worktree setup failed (fetch or worktree add — see issue-$n.log)"
+  issue_release "$n" "$HUMAN_LABEL"
+  exit 1
+fi
 cd "$wt"
 
 # --- Maker: one /implement run in its OWN context (one attempt of the build loop)
@@ -100,9 +83,13 @@ Implement GitHub issue #$n. Work only within this worktree.
 The full issue is included below — work from it directly; do not call gh or fetch
 anything over the network.
 Commit incrementally. You are DONE only when all tests pass and lint is clean.
-Do not stop early and do not hand back: if the work is hard, keep going until
-'$LINT_CMD' and '$TEST_CMD' both pass in $TEST_DIR. This loop will re-run you
-with the exact failures until that objective gate is green.
+Do not stop early: if the work is merely hard, keep going until '$LINT_CMD' and
+'$TEST_CMD' both pass in $TEST_DIR. This loop will re-run you with the exact
+failures until that objective gate is green.
+If — and only if — the issue is too underspecified or contradictory to implement
+responsibly, do NOT force a low-quality guess: write a file named $ESCALATE_FILE
+in the worktree root whose first line states the blocker in one sentence, then
+stop. A clean escalation beats a confident wrong answer.
 
 ${1:-}" \
     >/dev/null && IMPL_RC=0 || IMPL_RC=$?
@@ -111,57 +98,75 @@ ${1:-}" \
 # --- AFK retry machinery -----------------------------------------------------
 # No quality handbacks: the implementer is re-run, with each failure fed back,
 # until the objective gate is green. The only stops are safety/systemic ones that
-# retrying cannot clear (leaked secret, repeated /implement crash). RALPH_MAX_ATTEMPTS
-# (default 0 = unlimited) is an optional brake; RALPH_INFRA_RETRIES bounds crashes.
-ATTEMPTS=0; INFRA_STRIKES=0
-attempt_cap_hit() { [ "${RALPH_MAX_ATTEMPTS:-0}" -gt 0 ] && [ "$ATTEMPTS" -ge "${RALPH_MAX_ATTEMPTS}" ]; }
-budget_exceeded() { [ "${RALPH_ISSUE_BUDGET:-0}" -gt 0 ] && [ "$(elapsed)" -ge "${RALPH_ISSUE_BUDGET}" ]; }
-has_commits()     { ! git diff --quiet "origin/$BASE_BRANCH"...HEAD; }
+# retrying cannot clear (leaked secret, repeated /implement crash, an explicit
+# escalation). The accounting lives in lib.sh's retry budget (budget_start above):
+# RALPH_MAX_ATTEMPTS (0 = unlimited) is an optional brake, RALPH_INFRA_RETRIES
+# bounds crashes, RALPH_ISSUE_BUDGET bounds wall-clock.
+has_commits() { ! git diff --quiet "origin/$BASE_BRANCH"...HEAD; }
 
 # stop_issue <outcome> <exit-code> <reason> — relabel and record a terminal stop.
-# exit 3 is an infra error and exit 5 a safety stop (leaked secret) — both go to a
-# human, never back to the queue (run.sh maps 5 to a generic fail for the circuit
-# breaker); other codes re-queue the issue (ready-for-agent) so a later run
-# retries from a fresh worktree.
+# exit 3 is an infra error, 5 a safety stop (leaked secret) and 6 an implementer
+# escalation — all three go to a human, never back to the queue (run.sh maps 5/6
+# to a generic fail for the circuit breaker); other codes re-queue the issue
+# (ready-for-agent) so a later run retries from a fresh worktree.
 stop_issue() {
   local outcome="$1" code="$2" reason="$3" lbl="$READY_LABEL"
-  case "$code" in 3|5) lbl="$HUMAN_LABEL" ;; esac
+  case "$code" in 3|5|6) lbl="$HUMAN_LABEL" ;; esac
   log "#$n: $reason — ${lbl}"
-  gh issue edit "$n" --remove-label "$WORKING_LABEL" --add-label "$lbl" >/dev/null
-  record_metric "$n" "$outcome" "" "$(elapsed)" "$reason"
+  issue_release "$n" "$lbl"
+  record_metric "$n" "$outcome" "" "$(budget_elapsed)" "$reason"
   exit "$code"
 }
 
 # build_until_green <feedback> — run the implementer, then loop until the OBJECTIVE
 # lint+test gate passes, feeding each failure back. Commits accumulate across
-# attempts. Returns 0 (green), 1 (optional attempt cap hit), 3 (repeated crash).
+# attempts. Returns the shared budget protocol — 0 (green), 1 (attempt cap),
+# 3 (repeated crash), 4 (wall-clock budget) — plus 6 (implementer escalated).
 build_until_green() {
-  local feedback="$1" gate_tail
+  local feedback="$1" gate_tail brc
   while :; do
-    budget_exceeded && return 4
+    brc=0; budget_check || brc=$?
+    [ "$brc" = 4 ] && return 4
     run_impl_here "$feedback"
+    if [ -n "$(read_escalation "$PWD")" ]; then return 6; fi
     if ! has_commits; then
       if [ "${IMPL_RC:-0}" -ne 0 ]; then
-        INFRA_STRIKES=$((INFRA_STRIKES+1))
-        log "#$n: /implement crashed (exit $IMPL_RC) with no commits — infra strike $INFRA_STRIKES/${RALPH_INFRA_RETRIES}"
-        [ "$INFRA_STRIKES" -ge "${RALPH_INFRA_RETRIES:-3}" ] && return 3
+        brc=0; budget_strike || brc=$?
+        log "#$n: /implement crashed (exit $IMPL_RC) with no commits — infra strike $(budget_strikes)/${RALPH_INFRA_RETRIES}"
+        [ "$brc" = 3 ] && return 3
         feedback="The previous run did not complete. Implement issue #$n from scratch in this worktree and commit your work."
         continue
       fi
-      ATTEMPTS=$((ATTEMPTS+1)); attempt_cap_hit && return 1
-      log "#$n: /implement produced no commits — re-running with a firmer instruction (attempt $ATTEMPTS)"
+      brc=0; budget_attempt || brc=$?
+      [ "$brc" != 0 ] && return "$brc"
+      log "#$n: /implement produced no commits — re-running with a firmer instruction (attempt $(budget_attempts))"
       feedback="You produced NO commits. You MUST implement issue #$n and commit the code now — write the implementation and its tests, then commit."
       continue
     fi
-    INFRA_STRIKES=0
+    budget_strike_reset
     if run_quality_gate "$ilog"; then return 0; fi
-    ATTEMPTS=$((ATTEMPTS+1)); attempt_cap_hit && return 1
+    brc=0; budget_attempt || brc=$?
+    [ "$brc" != 0 ] && return "$brc"
     gate_tail="$(tail -n 80 "$ilog" 2>/dev/null || true)"
-    log "#$n: lint/tests still red — re-running implementer with the failure output (attempt $ATTEMPTS)"
+    log "#$n: lint/tests still red — re-running implementer with the failure output (attempt $(budget_attempts))"
     feedback="Your previous attempt left lint or tests FAILING in $TEST_DIR. Fix them until '$LINT_CMD' and '$TEST_CMD' both pass. The objective gate output was:
 
 $gate_tail"
   done
+}
+
+# route_build_rc <rc> <cap-outcome> <phase> — the ONE decoder for
+# build_until_green's return protocol (two near-identical case blocks used to
+# drift). Returns only on 0 (green); every other code is a terminal stop.
+route_build_rc() {
+  local rc="$1" cap_outcome="$2" phase="$3"
+  case "$rc" in
+    0) return 0 ;;
+    3) stop_issue tdd-error 3 "/implement crashed with no commits ${RALPH_INFRA_RETRIES}x $phase (infra error; see issue-$n.log)" ;;
+    4) stop_issue budget-exceeded 1 "wall-clock budget RALPH_ISSUE_BUDGET=${RALPH_ISSUE_BUDGET}s exceeded $phase — re-queued" ;;
+    6) stop_issue escalated 6 "implementer escalated: $(read_escalation "$PWD")" ;;
+    *) stop_issue "$cap_outcome" 1 "attempt cap RALPH_MAX_ATTEMPTS=${RALPH_MAX_ATTEMPTS} reached $phase" ;;
+  esac
 }
 
 # --- 1. Build until the objective gate is green ------------------------------
@@ -174,12 +179,7 @@ issue_ctx="$(gh issue view "$n" --json title,body \
 build_until_green "The issue to implement:
 
 $issue_ctx" && bg=0 || bg=$?
-case $bg in
-  0) : ;;
-  3) stop_issue tdd-error 3 "/implement crashed with no commits ${RALPH_INFRA_RETRIES}x (infra error; see issue-$n.log)" ;;
-  4) stop_issue budget-exceeded 1 "wall-clock budget RALPH_ISSUE_BUDGET=${RALPH_ISSUE_BUDGET}s exceeded before lint/tests passed — re-queued" ;;
-  *) stop_issue test-fail  1 "attempt cap RALPH_MAX_ATTEMPTS=${RALPH_MAX_ATTEMPTS} reached before lint/tests passed" ;;
-esac
+route_build_rc "$bg" test-fail "before lint/tests passed"
 
 # Accidental-secret gate (SAFETY, not quality): never open a PR whose diff leaks a
 # high-confidence secret. This is the one quality-independent hard stop that
@@ -240,12 +240,8 @@ fi
 rebuild_or_stop() {
   local fb="$1" cap_outcome="$2" rc
   build_until_green "$fb" && rc=0 || rc=$?
-  case $rc in
-    0) git push origin "$branch" >>"$ilog" 2>&1 || true ;;
-    3) stop_issue tdd-error 3 "/implement crashed during a fix loop ${RALPH_INFRA_RETRIES}x (infra error)" ;;
-    4) stop_issue budget-exceeded 1 "wall-clock budget RALPH_ISSUE_BUDGET=${RALPH_ISSUE_BUDGET}s exceeded during a fix loop — re-queued" ;;
-    *) stop_issue "$cap_outcome" 1 "attempt cap RALPH_MAX_ATTEMPTS=${RALPH_MAX_ATTEMPTS} reached during a fix loop" ;;
-  esac
+  route_build_rc "$rc" "$cap_outcome" "during a fix loop"
+  git push origin "$branch" >>"$ilog" 2>&1 || true
 }
 
 # --- 3. Correctness gate: retry until the change actually solves the ticket --
@@ -253,31 +249,37 @@ rebuild_or_stop() {
 # acceptance criteria + edge cases. In AFK mode a fail re-runs the implementer
 # (which keeps the gate green) until the verifier passes — never a handback.
 while ! verify_issue "$pr_url" "$n" "$ilog"; do
-  budget_exceeded && stop_issue budget-exceeded 1 "wall-clock budget RALPH_ISSUE_BUDGET=${RALPH_ISSUE_BUDGET}s exceeded before the correctness gate passed — re-queued"
-  # Count each failed verification against RALPH_MAX_ATTEMPTS here, before the
-  # rebuild: build_until_green only bumps ATTEMPTS on a red gate or no commits, so
-  # a verifier that keeps failing cheap-but-green rebuilds would otherwise spin
+  # Charge each failed verification against the budget here, before the rebuild:
+  # build_until_green only charges attempts on a red gate or no commits, so a
+  # verifier that keeps failing cheap-but-green rebuilds would otherwise spin
   # uncapped (only the wall-clock budget, default off, would stop it).
-  ATTEMPTS=$((ATTEMPTS+1))
-  attempt_cap_hit && stop_issue verify-fail 1 "attempt cap RALPH_MAX_ATTEMPTS=${RALPH_MAX_ATTEMPTS} reached before the correctness gate passed"
+  brc=0; budget_attempt || brc=$?
+  [ "$brc" = 4 ] && stop_issue budget-exceeded 1 "wall-clock budget RALPH_ISSUE_BUDGET=${RALPH_ISSUE_BUDGET}s exceeded before the correctness gate passed — re-queued"
+  [ "$brc" = 1 ] && stop_issue verify-fail 1 "attempt cap RALPH_MAX_ATTEMPTS=${RALPH_MAX_ATTEMPTS} reached before the correctness gate passed"
   log "#$n: correctness gap vs ticket — re-running implementer to satisfy issue #$n"
   rebuild_or_stop "An independent reviewer judged the change does NOT fully satisfy issue #$n: a stated acceptance criterion or an edge case (boundaries, empty or missing input, error paths) is unmet. Re-read issue #$n and strengthen the implementation and its tests so every acceptance criterion and edge case is covered." verify-fail
 done
 
 # --- 4. Review <-> resolve: retry until the review converges -----------------
-# review_and_resolve runs MAX_REVIEW_CYCLES of review<->fix per call and, in AFK
-# mode, returns non-zero WITHOUT handing back, exposing REVIEW_FAIL_REASON. Route
-# the retry: a red gate rebuilds, a leaked secret stops, anything else re-reviews.
-until review_and_resolve "$pr_url" "$branch" "$n" "$ilog"; do
-  ATTEMPTS=$((ATTEMPTS + ${LAST_REVIEW_CYCLES:-1}))
-  case "${REVIEW_FAIL_REASON:-threads}" in
+# review_and_resolve runs MAX_REVIEW_CYCLES of review<->fix per call, never hands
+# back, and prints '<outcome> <cycles>' (approved|threads|gate|secret). Route a
+# non-approving outcome: a red gate rebuilds, a leaked secret stops, anything
+# else re-reviews (AFK) or hands back to a human (RALPH_AFK=0).
+until review="$(review_and_resolve "$pr_url" "$branch" "$n" "$ilog")"; do
+  brc=0; budget_charge "${review##* }" || brc=$?
+  case "${review%% *}" in
     secret) stop_issue secret-detected 5 "secret appeared in the diff during review — safety stop" ;;
     gate)
       log "#$n: a review fix left lint/tests red — rebuilding until green"
       rebuild_or_stop "A change made during code review left lint or tests FAILING in $TEST_DIR. Fix them until '$LINT_CMD' and '$TEST_CMD' both pass." handback ;;
     *)
-      budget_exceeded && stop_issue budget-exceeded 1 "wall-clock budget RALPH_ISSUE_BUDGET=${RALPH_ISSUE_BUDGET}s exceeded before review converged — re-queued"
-      attempt_cap_hit && stop_issue handback 1 "attempt cap RALPH_MAX_ATTEMPTS=${RALPH_MAX_ATTEMPTS} reached before review converged"
+      if [ "${RALPH_AFK:-1}" != "1" ]; then
+        log "#$n: review did not converge — handing PR to human (RALPH_AFK=0)"
+        hand_back "$pr_url" "$n" "$ilog"
+        stop_issue handback 1 "review did not converge — handed to a human (RALPH_AFK=0)"
+      fi
+      [ "$brc" = 4 ] && stop_issue budget-exceeded 1 "wall-clock budget RALPH_ISSUE_BUDGET=${RALPH_ISSUE_BUDGET}s exceeded before review converged — re-queued"
+      [ "$brc" = 1 ] && stop_issue handback 1 "attempt cap RALPH_MAX_ATTEMPTS=${RALPH_MAX_ATTEMPTS} reached before review converged"
       log "#$n: review not converged this pass — re-reviewing" ;;
   esac
 done
@@ -288,7 +290,7 @@ done
 # checkpoint). Remote-branch cleanup is handed to the repo's
 # delete-branch-on-merge setting; the local branch + worktree are removed in
 # cleanup(). Verify by PR STATE, not gh's exit code.
-record_metric "$n" approved "${LAST_REVIEW_CYCLES:-}" "$(elapsed)"
+record_metric "$n" approved "${review##* }" "$(budget_elapsed)"
 log "#$n: approved — un-drafting; the merge is yours"
 approve_pr "$pr_url" "$n" "$ilog"
 state="$(gh pr view "$pr_url" --json state,isDraft -q '"\(.state) \(.isDraft)"' 2>/dev/null || echo "UNKNOWN true")"

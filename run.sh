@@ -13,6 +13,7 @@
 source "$(dirname "$0")/lib.sh"
 
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "Not a git repo"; exit 1; }
+ralph_init
 
 mkdir -p "$LOG_DIR"
 
@@ -35,7 +36,7 @@ trap 'log "=== Ralph loop stopped (signal received). ==="; exit 0' INT TERM
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
   log "DRY RUN — eligible issues right now:"
-  ready_issues | while read -r n; do
+  eligible_issues | while read -r n; do
     log "  would process #$n — $(gh issue view "$n" --json title -q .title)"
   done
   log "DRY RUN complete. No changes made."
@@ -47,11 +48,10 @@ fi
 # PRs whose CI is failing. Approved + green PRs are left alone — the merge is the
 # human's checkpoint; Ralph never merges and never enables auto-merge.
 maintain_prs() {
-  local prs num branch draft mergeable n ci state
-  prs="$(gh pr list --state open --json number,headRefName,isDraft,mergeable \
-        -q '.[] | select(.headRefName | startswith("issue/")) | [.number,.headRefName,.isDraft,.mergeable] | @tsv' 2>/dev/null || true)"
+  local prs num branch draft mergeable title n ci state
+  prs="$(ralph_open_prs)"
   [ -z "$prs" ] && { log "  (no open Ralph PRs to maintain)"; return 0; }
-  while IFS=$'\t' read -r num branch draft mergeable; do
+  while IFS=$'\t' read -r num branch draft mergeable title; do
     [ -z "$num" ] && continue
     [ "$draft" = "true" ] && continue        # handed-back PRs are the human's
     n="${branch#issue/}"
@@ -106,6 +106,7 @@ process_one() {
   case "$rc" in
     0) log "<<< #$n completed"; echo ok ;;
     3) log "<<< #$n handed to human (infra error)"; echo infra ;;
+    6) log "<<< #$n escalated to human (underspecified issue)"; echo fail ;;
     *) log "<<< #$n handed to human"; echo fail ;;
   esac >> "$RUN_OUTCOMES"
   return 0
@@ -138,10 +139,10 @@ refresh_base() {
 # crash between claiming an issue and opening its PR.
 reap_stale_working() {
   local n
-  for n in $(gh issue list --label "$WORKING_LABEL" --state open --json number -q '.[].number' 2>/dev/null); do
+  for n in $(issue_list "$WORKING_LABEL"); do
     has_open_pr "$n" && continue   # has a PR — handled by resume/maintain / a human
     log "  reaped orphaned #$n (claude-working, no PR) — returning to $READY_LABEL"
-    gh issue edit "$n" --remove-label "$WORKING_LABEL" --add-label "$READY_LABEL" >/dev/null 2>&1 || true
+    issue_release "$n" "$READY_LABEL"
   done
 }
 
@@ -151,12 +152,12 @@ reap_stale_working() {
 # such a PR was abandoned by a crash. Re-enter review via resolve-conflicts.sh
 # (its rebase is a no-op when the branch is already current).
 resume_stranded() {
-  local prs num branch n labels
-  prs="$(gh pr list --state open --json number,headRefName,isDraft \
-        -q '.[] | select(.headRefName|startswith("issue/")) | select(.isDraft==true) | [.number,.headRefName]|@tsv' 2>/dev/null || true)"
+  local prs num branch draft mergeable title n labels
+  prs="$(ralph_open_prs)"
   [ -z "$prs" ] && return 0
-  while IFS=$'\t' read -r num branch; do
+  while IFS=$'\t' read -r num branch draft mergeable title; do
     [ -z "$num" ] && continue
+    [ "$draft" = "true" ] || continue
     # "working" = draft AND not a handback ([HUMAN_LABEL]-prefixed) — pr_state
     # subsumes the old draft + title-prefix checks. The claude-working ISSUE label
     # is a separate, orthogonal signal (the crash-orphan marker), kept below.
@@ -191,7 +192,7 @@ while :; do
   log "--- Cycle $cycle: maintaining open PRs (conflicts + CI health) ---"
   maintain_prs || log "  maintenance sweep errored (continuing)"
 
-  mapfile -t batch < <(ready_issues)
+  mapfile -t batch < <(eligible_issues)
   conc="$RALPH_CONCURRENCY"; [ "$conc" -ge 1 ] 2>/dev/null || conc=1
   log "--- Cycle $cycle: ${#batch[@]} eligible issue(s), concurrency $conc ---"
 
@@ -224,15 +225,22 @@ while :; do
   fi
 
   # Terminal condition: exit once nothing is eligible AND nothing is in flight.
-  # "In flight" = draft issue/* PRs still mid-review that are NOT handed-back.
+  # "In flight" = draft issue/* PRs still mid-review that are NOT handed-back —
+  # exactly classify_pr's 'working' state (a draft needs no marker/commit epochs
+  # to classify), so the handback title convention is decoded in ONE place
+  # instead of a hand-rolled jq that once dropped the load-bearing trailing space.
   # Approved PRs do NOT count — they wait for the human's merge, which can happen
   # long after the loop exits; blocking exit on them would poll forever. A merge
   # that lands unblocks its dependents — re-run the loop (or leave it running with
   # issues still queued) to pick those up. Ralph self-terminates when the queue is
   # clear and no review is mid-flight.
-  inflight="$(gh pr list --state open --json headRefName,isDraft,title \
-      -q '[.[] | select(.headRefName|startswith("issue/")) | select(.isDraft and ((.title|startswith("['"$HUMAN_LABEL"']")) | not))] | length' 2>/dev/null || echo 0)"
-  remaining="$(ready_count)"
+  inflight=0
+  while IFS=$'\t' read -r num branch draft mergeable title; do
+    [ -z "$num" ] && continue
+    d=0; [ "$draft" = "true" ] && d=1
+    [ "$(classify_pr "$d" "$title" "" "")" = working ] && inflight=$((inflight+1))
+  done <<< "$(ralph_open_prs)"
+  remaining="$(eligible_count)"
   if [ "${remaining:-0}" -eq 0 ] && [ "${inflight:-0}" -eq 0 ]; then
     refresh_base   # land the human on a current master (the last merges happened after the last cycle-start refresh)
     log "=== Queue drained, nothing mid-review — Ralph loop done (approved PRs await your merge). ==="
