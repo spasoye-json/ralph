@@ -207,6 +207,49 @@ RALPH_INFRA_RETRIES=2 budget_strike; [ "$?" = 0 ] && ok || bad "strike streak re
 budget_start 5 0
 budget_check; [ "$?" = 0 ]    && ok || bad "fresh budget checks clean"
 
+# --- 10b. toolchain-agnostic gate wiring ---------------------------------------
+# Ralph shells out to config.sh commands and assumes no toolchain. Pin the two
+# pure deciders so a node assumption cannot creep back in.
+printf '== gate wiring (gate_cmds_text, needs_setup) ==\n'
+(
+  LINT_CMD="npm run lint"; TEST_CMD="npm test"
+  [ "$(gate_cmds_text)" = "'npm run lint' and 'npm test'" ] && exit 0 || exit 1
+) && ok || bad "gate_cmds_text joins both commands"
+( LINT_CMD=""; TEST_CMD="go test ./..."; [ "$(gate_cmds_text)" = "'go test ./...'" ] ) \
+  && ok || bad "gate_cmds_text drops an empty LINT_CMD"
+( LINT_CMD="cargo clippy"; TEST_CMD=""; [ "$(gate_cmds_text)" = "'cargo clippy'" ] ) \
+  && ok || bad "gate_cmds_text drops an empty TEST_CMD"
+( LINT_CMD=""; TEST_CMD=""; printf '%s' "$(gate_cmds_text)" | grep -q "''" ) \
+  && bad "gate_cmds_text must not emit empty quotes when both are unset" || ok
+
+sfix="$(mktemp -d)"
+(
+  cd "$sfix" || exit 1
+  SETUP_CMD=""; SETUP_MARKER=""; SETUP_LOCK=""
+  needs_setup && exit 1                                  # no SETUP_CMD: never
+  SETUP_CMD="npm ci"
+  needs_setup || exit 1                                  # no marker: always
+  SETUP_MARKER="deps"
+  needs_setup || exit 1                                  # marker missing
+  mkdir -p deps
+  needs_setup || exit 1                                  # marker EMPTY (docker mountpoint)
+  touch deps/installed
+  needs_setup && exit 1                                  # marker populated
+  SETUP_LOCK="lock"; touch lock
+  needs_setup || exit 1                                  # lock newer than marker
+  touch deps
+  needs_setup && exit 1                                  # marker newer than lock
+  exit 0
+) && ok || bad "needs_setup: marker/lock staleness rules"
+rm -rf "$sfix"
+
+# No entry point may hardcode a toolchain: every command comes from config.sh.
+for f in "$HERE"/lib.sh "$HERE"/process-issue.sh "$HERE"/run.sh "$HERE"/resolve-conflicts.sh; do
+  grep -nE '(^|[^A-Za-z_-])(npm|npx|yarn|pnpm|cargo|bundle|pytest|gradlew)([^A-Za-z_-]|$)' "$f" \
+    | grep -v '^[0-9]*:[[:space:]]*#' | grep -q . \
+    && bad "$(basename "$f") hardcodes a toolchain command outside a comment" || ok
+done
+
 # --- 11. metrics outcome vocabulary -------------------------------------------------
 # Pin the one outcome enum record_metric validates and status.sh iterates.
 printf '== outcome vocabulary (metric_outcome_valid) ==\n'

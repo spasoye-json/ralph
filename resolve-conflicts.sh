@@ -49,7 +49,7 @@ if git rebase "origin/$BASE_BRANCH" >>"$ilog" 2>&1; then
   log "#$n: rebased cleanly (no conflicts)"
 else
   log "#$n: conflicts during rebase — agent resolving"
-  run_stage conflict "$n" "$ilog" "You are in a git worktree on branch '$branch', part-way through 'git rebase origin/$BASE_BRANCH' which has STOPPED on a conflict. Drive the rebase to completion: resolve the conflicts in the current commit so both this PR's intent (GitHub issue #$n) and the changes already on $BASE_BRANCH are preserved, 'git add' the resolved files, run 'git rebase --continue', and REPEAT until 'git status' shows no rebase in progress. Keep the $TEST_DIR test suite ('$TEST_CMD') and lint ('$LINT_CMD') green. Do NOT run 'git rebase --abort' and do NOT push." \
+  run_stage conflict "$n" "$ilog" "You are in a git worktree on branch '$branch', part-way through 'git rebase origin/$BASE_BRANCH' which has STOPPED on a conflict. Drive the rebase to completion: resolve the conflicts in the current commit so both this PR's intent (GitHub issue #$n) and the changes already on $BASE_BRANCH are preserved, 'git add' the resolved files, run 'git rebase --continue', and REPEAT until 'git status' shows no rebase in progress. Keep $(gate_cmds_text) green in $TEST_DIR. Do NOT run 'git rebase --abort' and do NOT push." \
     >/dev/null || true
 
   # If a rebase is still in progress, it wasn't fully resolved — bail to a human.

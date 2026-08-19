@@ -83,9 +83,9 @@ Implement GitHub issue #$n. Work only within this worktree.
 The full issue is included below — work from it directly; do not call gh or fetch
 anything over the network.
 Commit incrementally. You are DONE only when all tests pass and lint is clean.
-Do not stop early: if the work is merely hard, keep going until '$LINT_CMD' and
-'$TEST_CMD' both pass in $TEST_DIR. This loop will re-run you with the exact
-failures until that objective gate is green.
+Do not stop early: if the work is merely hard, keep going until $(gate_cmds_text)
+pass in $TEST_DIR. This loop will re-run you with the exact failures until that
+objective gate is green.
 If — and only if — the issue is too underspecified or contradictory to implement
 responsibly, do NOT force a low-quality guess: write a file named $ESCALATE_FILE
 in the worktree root whose first line states the blocker in one sentence, then
@@ -149,7 +149,7 @@ build_until_green() {
     [ "$brc" != 0 ] && return "$brc"
     gate_tail="$(tail -n 80 "$ilog" 2>/dev/null || true)"
     log "#$n: lint/tests still red — re-running implementer with the failure output (attempt $(budget_attempts))"
-    feedback="Your previous attempt left lint or tests FAILING in $TEST_DIR. Fix them until '$LINT_CMD' and '$TEST_CMD' both pass. The objective gate output was:
+    feedback="Your previous attempt left lint or tests FAILING in $TEST_DIR. Fix them until $(gate_cmds_text) pass. The objective gate output was:
 
 $gate_tail"
   done
@@ -271,7 +271,7 @@ until review="$(review_and_resolve "$pr_url" "$branch" "$n" "$ilog")"; do
     secret) stop_issue secret-detected 5 "secret appeared in the diff during review — safety stop" ;;
     gate)
       log "#$n: a review fix left lint/tests red — rebuilding until green"
-      rebuild_or_stop "A change made during code review left lint or tests FAILING in $TEST_DIR. Fix them until '$LINT_CMD' and '$TEST_CMD' both pass." handback ;;
+      rebuild_or_stop "A change made during code review left lint or tests FAILING in $TEST_DIR. Fix them until $(gate_cmds_text) pass." handback ;;
     *)
       if [ "${RALPH_AFK:-1}" != "1" ]; then
         log "#$n: review did not converge — handing PR to human (RALPH_AFK=0)"
