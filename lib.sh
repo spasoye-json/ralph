@@ -203,9 +203,6 @@ ralph_init() {
   REPO_ROOT="$(git rev-parse --show-toplevel)"
 
   mapfile -t ALLOWED_TOOLS < <(jq -r '.permissions.allow[]' "$REPO_ROOT/.claude/settings.json" 2>/dev/null)
-  if [ "${#ALLOWED_TOOLS[@]}" -eq 0 ]; then
-    echo "ralph: no allowlist in $REPO_ROOT/.claude/settings.json — writer roles run with bypassPermissions inside the sandbox" >&2
-  fi
 
   if [ "$RALPH_TRIM_MCP" = "1" ] && command -v claude >/dev/null 2>&1; then
     claude --help 2>&1 | grep -q -- '--strict-mcp-config' && CLAUDE_HAS_STRICT_MCP=1 || true
