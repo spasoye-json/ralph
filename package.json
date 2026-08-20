@@ -1,0 +1,32 @@
+{
+  "name": "ralph-afk",
+  "version": "1.0.0",
+  "description": "AFK agent loop: takes labelled GitHub issues to reviewed PRs with Claude Code, in a docker sandbox, behind an objective lint and test gate",
+  "keywords": ["claude", "claude-code", "agent", "afk", "github", "automation", "tdd"],
+  "homepage": "https://github.com/spasoye-json/ralph#readme",
+  "bugs": "https://github.com/spasoye-json/ralph/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/spasoye-json/ralph.git"
+  },
+  "license": "MIT",
+  "bin": {
+    "ralph": "bin/ralph"
+  },
+  "files": [
+    "bin/",
+    "templates/",
+    "eval/",
+    "sandbox/",
+    "*.sh",
+    ".env.example",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": ["linux"],
+  "scripts": {
+    "test": "./eval.sh"
+  }
+}

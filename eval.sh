@@ -6,7 +6,7 @@
 # NO agents and makes no network calls; it asserts:
 #   - the capability boundary (INJECTION_GUARD) is present and prohibits the key actions
 #   - the correctness-verdict parse, escalation sentinel, secret scan
-# Run it before and after changing any guard/prompt logic:  ./ralph/eval.sh
+# Run it before and after changing any guard/prompt logic:  ralph eval
 # Exit status is non-zero if any assertion fails (usable as a CI/pre-push gate).
 
 # Sourcing lib.sh is side-effect free; the effectful init (allowlist load, claude

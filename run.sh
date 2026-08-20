@@ -6,9 +6,9 @@
 # added or unblocked since the last cycle. There is no per-agent turn cap; each
 # /implement, review, and resolve session runs to completion.
 #
-# Usage:   ./ralph/run.sh                       (runs forever; Ctrl-C to stop)
-# Dry run: DRY_RUN=1 ./ralph/run.sh             (lists eligible once, exits)
-# Tunable: POLL_INTERVAL=900 ./ralph/run.sh     (poll every 15 min instead of 30)
+# Usage:   ralph run                       (runs forever; Ctrl-C to stop)
+# Dry run: ralph run --dry             (lists eligible once, exits)
+# Tunable: POLL_INTERVAL=900 ralph run     (poll every 15 min instead of 30)
 
 source "$(dirname "$0")/lib.sh"
 

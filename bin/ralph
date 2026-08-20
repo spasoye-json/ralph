@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# ralph — one entry point for the whole loop. Installed as a package binary, so
+# it runs from node_modules while every path it touches belongs to the repo the
+# shell is currently in.
+set -euo pipefail
+
+# Resolve this file through any npm bin symlink to reach the real install dir.
+# dirname "$0" would otherwise land in node_modules/.bin, where lib.sh is not.
+_self="${BASH_SOURCE[0]}"
+while [ -L "$_self" ]; do
+  _dir="$(cd "$(dirname "$_self")" && pwd)"
+  _self="$(readlink "$_self")"
+  case "$_self" in /*) ;; *) _self="$_dir/$_self" ;; esac
+done
+RALPH_HOME="$(cd "$(dirname "$_self")/.." && pwd)"
+
+usage() {
+  cat <<USAGE
+ralph — GitHub issues to reviewed PRs, unattended.
+
+  ralph run                 run the loop until the queue and reviews are dry
+  ralph run --dry           list the issues it would pick up, then exit
+  ralph status              queue, open PRs and throughput for this repo
+  ralph config              every resolved config value, and where it came from
+  ralph init                write .ralph/ (config.sh, .env, .gitignore) here
+  ralph sandbox-build [img] build the writer sandbox image (default: config's
+                            RALPH_SANDBOX_BASE)
+  ralph link-skills         link /implement, /tdd, /code-review into ~/.claude
+  ralph eval                offline regression gate over the pure helpers
+  ralph eval-agents [case…] end-to-end agent eval over eval/agent-cases
+  ralph threads <cmd> …     review-thread helper (used by the reviewer stage)
+  ralph process-issue <n>   run one issue through the pipeline, no loop
+  ralph doctor              check the host prerequisites
+  ralph home                print the install directory
+  ralph version             print the installed version
+
+State lives in .ralph/ in the repo you run from, so one install drives every
+repo. Full docs: \$(ralph home)/README.md
+USAGE
+}
+
+repo_root() {
+  git rev-parse --show-toplevel 2>/dev/null || {
+    echo "ralph: not inside a git repository" >&2
+    exit 1
+  }
+}
+
+cmd_init() {
+  local root state src
+  root="$(repo_root)"
+  state="$root/.ralph"
+  if [ "${1:-}" = "--print" ]; then cat "$RALPH_HOME/templates/config.sh"; return 0; fi
+
+  mkdir -p "$state"
+  if [ -e "$state/config.sh" ]; then
+    echo "kept    $state/config.sh (already exists)"
+  else
+    cp "$RALPH_HOME/templates/config.sh" "$state/config.sh"
+    echo "wrote   $state/config.sh — edit this: gate commands, base branch, sandbox base image"
+  fi
+  if [ -e "$state/.env" ]; then
+    echo "kept    $state/.env (already exists)"
+  else
+    cp "$RALPH_HOME/.env.example" "$state/.env"
+    echo "wrote   $state/.env — put CLAUDE_CODE_OAUTH_TOKEN in it (\`claude setup-token\`)"
+  fi
+  printf 'logs/\n.env\n' > "$state/.gitignore"
+  echo "wrote   $state/.gitignore (logs/ and .env stay out of git)"
+
+  # A checked-in ralph/ from before the package split still holds this project's
+  # metrics and token. Moving them is the user's call, but silence would lose them.
+  if [ -d "$root/ralph/logs" ] && [ ! -d "$state/logs" ]; then
+    echo
+    echo "note    $root/ralph/logs still holds this project's metrics."
+    echo "        mv $root/ralph/logs $state/logs   # keep the throughput history"
+    if [ -f "$root/ralph/.env" ]; then
+      echo "        mv $root/ralph/.env $state/.env    # keep the token"
+    fi
+  fi
+  echo
+  echo "next    commit .ralph/config.sh, then: ralph doctor && ralph sandbox-build"
+}
+
+cmd_config() {
+  # shellcheck source=/dev/null
+  ( set +u; . "$RALPH_HOME/lib.sh"
+    echo "install     $RALPH_HOME"
+    echo "state       $RALPH_STATE"
+    echo "project cfg $([ -f "$RALPH_STATE/config.sh" ] && echo "$RALPH_STATE/config.sh" || echo "(none — run: ralph init)")"
+    echo "env file    $([ -f "$RALPH_STATE/.env" ] && echo "$RALPH_STATE/.env" || echo "(none)")"
+    echo "logs        $LOG_DIR"
+    echo
+    for v in BASE_BRANCH READY_LABEL WORKING_LABEL HUMAN_LABEL \
+             TEST_DIR LINT_CMD TEST_CMD SETUP_CMD SETUP_MARKER SETUP_LOCK AUDIT_CMD \
+             RALPH_SANDBOX RALPH_SANDBOX_IMAGE RALPH_SANDBOX_BASE RALPH_DEP_MOUNT_MODE \
+             RALPH_AFK RALPH_MAX_ATTEMPTS RALPH_ISSUE_BUDGET RALPH_CONCURRENCY \
+             MAX_REVIEW_CYCLES AGENT_TIMEOUT MODEL_IMPLEMENT MODEL_REVIEW MODEL_VERIFY; do
+      printf '%-22s %s\n' "$v" "${!v-}"
+    done
+    printf '%-22s %s\n' RALPH_WORKSPACE_DIRS "${RALPH_WORKSPACE_DIRS[*]-}"
+    printf '%-22s %s\n' RALPH_DEP_DIRS       "${RALPH_DEP_DIRS[*]-}"
+    printf '%-22s %s\n' RALPH_CACHE_MOUNTS   "${RALPH_CACHE_MOUNTS[*]-}"
+  )
+}
+
+cmd_sandbox_build() {
+  local base="${1:-}"
+  if [ -z "$base" ]; then
+    base="$( ( . "$RALPH_HOME/lib.sh"; echo "$RALPH_SANDBOX_BASE" ) )"
+  fi
+  local tag
+  tag="$( ( . "$RALPH_HOME/lib.sh"; echo "$RALPH_SANDBOX_IMAGE" ) )"
+  echo "building $tag from $base"
+  docker build -t "$tag" --build-arg BASE_IMAGE="$base" "$RALPH_HOME/sandbox"
+}
+
+cmd_doctor() {
+  local rc=0 root
+  for c in git gh docker claude jq flock; do
+    if command -v "$c" >/dev/null 2>&1; then
+      printf 'ok      %s\n' "$c"
+    else
+      printf 'MISSING %s\n' "$c"; rc=1
+    fi
+  done
+  root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "$root" ]; then printf 'ok      repo %s\n' "$root"; else printf 'MISSING not in a git repo\n'; rc=1; fi
+  if [ -n "$root" ] && [ -f "$root/.ralph/config.sh" ]; then
+    printf 'ok      %s\n' "$root/.ralph/config.sh"
+  else
+    printf 'MISSING .ralph/config.sh — run: ralph init\n'; rc=1
+  fi
+  if gh auth status >/dev/null 2>&1; then printf 'ok      gh auth\n'; else printf 'MISSING gh auth — run: gh auth login\n'; rc=1; fi
+  if docker info >/dev/null 2>&1; then printf 'ok      docker daemon\n'; else printf 'MISSING docker daemon not reachable\n'; rc=1; fi
+  for s in implement tdd code-review; do
+    if [ -r "$HOME/.claude/skills/$s/SKILL.md" ]; then
+      printf 'ok      /%s\n' "$s"
+    else
+      printf 'MISSING /%s — run: ralph link-skills\n' "$s"; rc=1
+    fi
+  done
+  return $rc
+}
+
+cmd="${1:-help}"
+[ $# -gt 0 ] && shift || true
+case "$cmd" in
+  run)               if [ "${1:-}" = "--dry" ] || [ "${1:-}" = "-n" ]; then
+                       shift; export DRY_RUN=1
+                     fi
+                     exec "$RALPH_HOME/run.sh" "$@" ;;
+  status)            exec "$RALPH_HOME/status.sh" "$@" ;;
+  threads)           exec "$RALPH_HOME/threads.sh" "$@" ;;
+  eval)              exec "$RALPH_HOME/eval.sh" "$@" ;;
+  eval-agents)       exec "$RALPH_HOME/eval-agents.sh" "$@" ;;
+  resolve-conflicts) exec "$RALPH_HOME/resolve-conflicts.sh" "$@" ;;
+  process-issue)     exec "$RALPH_HOME/process-issue.sh" "$@" ;;
+  link-skills)       exec "$RALPH_HOME/link-skills.sh" "$@" ;;
+  init)              cmd_init "$@" ;;
+  config)            cmd_config ;;
+  sandbox-build)     cmd_sandbox_build "$@" ;;
+  doctor)            cmd_doctor ;;
+  home)              echo "$RALPH_HOME" ;;
+  version|--version|-v)
+                     ( . "$RALPH_HOME/lib.sh" >/dev/null 2>&1 || true
+                       jq -r .version "$RALPH_HOME/package.json" 2>/dev/null || echo unknown ) ;;
+  help|--help|-h)    usage ;;
+  *)                 echo "ralph: unknown command '$cmd'" >&2; echo >&2; usage >&2; exit 2 ;;
+esac

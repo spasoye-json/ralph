@@ -4,20 +4,40 @@
 
 set -euo pipefail
 
+# --- Where ralph lives vs. where a project keeps its ralph state -------------
+# RALPH_HOME is the INSTALL: these scripts, the sandbox Dockerfile, the eval
+# cases. Ralph never writes here, so it may be a node_modules directory that the
+# next `npm install` replaces wholesale.
+# RALPH_STATE is the PROJECT: config.sh, .env and logs/. It lives in the target
+# repo (.ralph/), so one install drives any number of repos and reinstalling
+# ralph can never wipe a project's metrics or secrets.
+RALPH_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -z "${RALPH_STATE:-}" ]; then
+  _ralph_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "$_ralph_root" ]; then RALPH_STATE="$_ralph_root/.ralph"; else RALPH_STATE="$RALPH_HOME"; fi
+  unset _ralph_root
+fi
+
 # Optional local secrets/overrides (gitignored). Keeps CLAUDE_CODE_OAUTH_TOKEN —
 # needed to authenticate the sandboxed implementer — out of your shell profile.
 # set -a exports every assignment so the value reaches child agents (and the
 # `docker run -e` passthrough). Sourced by every entry point, so it also works
-# when process-issue.sh is run directly.
-_ralph_env="$(dirname "${BASH_SOURCE[0]}")/.env"
-if [ -f "$_ralph_env" ]; then set -a; . "$_ralph_env"; set +a; fi
+# when process-issue.sh is run directly. The in-install .env is the fallback for
+# a checked-out (non-package) ralph.
+for _ralph_env in "$RALPH_STATE/.env" "$RALPH_HOME/.env"; do
+  if [ -f "$_ralph_env" ]; then set -a; . "$_ralph_env"; set +a; break; fi
+done
 unset _ralph_env
 
 # --- Config (override via env before calling run.sh) -------------------------
 # Project wiring (labels, base branch, gate dir/commands, sandbox image, mount
-# dirs) lives in config.sh — the one file to edit per project. Env still wins:
-# config.sh only fills values that are unset.
-. "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+# dirs) lives in .ralph/config.sh in the project — the one file to edit per
+# project; `ralph init` writes a starter. It is sourced FIRST, so the packaged
+# config.sh below can only fill in what the project left unset, and a new knob
+# added upstream gets its default without touching the project file.
+# Env still wins over both: every value uses the ${VAR:-default} idiom.
+if [ -f "$RALPH_STATE/config.sh" ]; then . "$RALPH_STATE/config.sh"; fi
+. "$RALPH_HOME/config.sh"
 
 # Array config predates nothing, but a config.sh carried over from an older copy
 # may not declare these. Default them so set -u cannot kill the loop over a knob
@@ -102,7 +122,7 @@ RALPH_DEP_MOUNT_MODE="${RALPH_DEP_MOUNT_MODE:-ro}"    # RALPH_DEP_DIRS mount mod
 EVAL_SANDBOX="${EVAL_SANDBOX:-1}"
 
 REPO_ROOT=""   # resolved by ralph_init (needs a git checkout)
-LOG_DIR="${LOG_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/logs}"
+LOG_DIR="${LOG_DIR:-$RALPH_STATE/logs}"
 METRICS_FILE="${METRICS_FILE:-$LOG_DIR/metrics.csv}"  # per-issue outcome log (gitignored under logs/)
 
 # Escalation: the implementer may decline an underspecified or low-confidence
@@ -127,8 +147,8 @@ MCP_TRIM_ARGS=()
 # when posting the approval comment and when verifying it (classify_pr / pr_state).
 APPROVAL_MARKER="${APPROVAL_MARKER:-Automated code review: APPROVED}"
 
-# Absolute path to this dir (worktree-bound agents can't see the untracked ralph/).
-RALPH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Absolute path to the install (worktree-bound agents can't see it otherwise).
+RALPH_DIR="$RALPH_HOME"
 
 # Implementer allowlist: the broad project allowlist (.claude/settings.json is
 # ignored inside the untrusted per-issue worktrees, so we pass it explicitly via
@@ -228,7 +248,7 @@ CLAUDE_CMD=(claude)
 # the /implement, /tdd and /code-review skills resolve inside the container.
 # ~/.claude/skills is mounted whole; each of the three entries may be a SYMLINK
 # whose target lives outside that tree — into the mattpocock-skills plugin cache
-# (ralph/link-skills.sh) or into ~/.agents/skills (the git-clone layout) — so
+# (ralph link-skills) or into ~/.agents/skills (the git-clone layout) — so
 # every link target is also mounted read-only at its resolved host path, where
 # the absolute link lands inside the container too. Relative '../../.agents'
 # links are covered by the ~/.agents/skills mount kept for the old layout.
@@ -251,7 +271,7 @@ skill_mounts() {
 sandbox_preflight() {
   command -v docker >/dev/null 2>&1 || { log "sandbox: docker not on PATH"; return 1; }
   docker image inspect "$RALPH_SANDBOX_IMAGE" >/dev/null 2>&1 \
-    || { log "sandbox: image '$RALPH_SANDBOX_IMAGE' not built — run: docker build -t $RALPH_SANDBOX_IMAGE ralph/sandbox"; return 1; }
+    || { log "sandbox: image '$RALPH_SANDBOX_IMAGE' not built — run: ralph sandbox-build"; return 1; }
   [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}${ANTHROPIC_API_KEY:-}" ] \
     || { log "sandbox: set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY so the sandboxed claude can authenticate"; return 1; }
   # Smoke-check that /implement — and the /tdd + /code-review skills it delegates
@@ -264,7 +284,7 @@ sandbox_preflight() {
   docker run --rm --user "$(id -u):$(id -g)" -e HOME=/home/agent \
     "${mounts[@]}" --entrypoint sh "$RALPH_SANDBOX_IMAGE" \
     -c 'test -r /home/agent/.claude/skills/implement/SKILL.md -a -r /home/agent/.claude/skills/tdd/SKILL.md -a -r /home/agent/.claude/skills/code-review/SKILL.md' 2>/dev/null \
-    || { log "sandbox: /implement (or /tdd, /code-review) does not resolve inside '"$RALPH_SANDBOX_IMAGE"' — run ralph/link-skills.sh, then re-check the symlinks in ~/.claude/skills"; return 1; }
+    || { log "sandbox: /implement (or /tdd, /code-review) does not resolve inside '"$RALPH_SANDBOX_IMAGE"' — run ralph link-skills, then re-check the symlinks in ~/.claude/skills"; return 1; }
   return 0
 }
 
@@ -426,7 +446,7 @@ run_stage() {
 
   # Sandbox shadow for the writer roles, confined to this call: sandbox_impl_cmd
   # fills the local CLAUDE_CMD copy, so later host stages keep bare claude. The
-  # MCP-trim is blanked because its config file (ralph/logs) isn't mounted in the
+  # MCP-trim is blanked because its config file (.ralph/logs) isn't mounted in the
   # container, so --mcp-config would point at an unreachable path. EVAL_SANDBOX
   # (default 1) lets the eval path opt out for speed; production always sandboxes
   # when RALPH_SANDBOX=1.

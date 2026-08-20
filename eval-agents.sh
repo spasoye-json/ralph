@@ -15,9 +15,9 @@
 # escalation sentinel is honoured (outcome 'escalate').
 #
 # Usage:
-#   ./ralph/eval-agents.sh                 # run every fixture in ralph/eval/agent-cases/
-#   ./ralph/eval-agents.sh clamp-util      # run only the named fixture slug(s)
-#   ./ralph/eval-agents.sh --list          # parse + list fixtures, run nothing
+#   ralph eval-agents                 # run every fixture in eval/agent-cases/
+#   ralph eval-agents clamp-util      # run only the named fixture slug(s)
+#   ralph eval-agents --list          # parse + list fixtures, run nothing
 #
 # Tunables (besides the MODEL_*/TEST_* knobs inherited from lib.sh):
 #   EVAL_BASE         git ref the worktrees are cut from (default: current HEAD)
