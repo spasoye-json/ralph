@@ -46,3 +46,20 @@ for s in "${SKILLS[@]}"; do
   fi
   echo "linked $cur -> $tgt"
 done
+
+# Ralph's own skill ships in this install, so `npm update` refreshes the
+# documentation with the code. Same layout as above: a symlink into
+# ~/.claude/skills, left alone if a real directory already sits there.
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+own="$_here/skills/ralph"
+if [ -r "$own/SKILL.md" ]; then
+  cur="$DEST/ralph"
+  if [ -L "$cur" ] || [ ! -e "$cur" ]; then
+    ln -sfn "$own" "$cur"
+    echo "linked $cur -> $own"
+  else
+    echo "link-skills: $cur exists and is not a symlink — left alone" >&2
+  fi
+else
+  echo "link-skills: $own/SKILL.md missing — ralph skill not linked" >&2
+fi

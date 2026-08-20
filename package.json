@@ -17,6 +17,7 @@
     "bin/",
     "templates/",
     "eval/",
+    "skills/",
     "sandbox/",
     "*.sh",
     ".env.example",

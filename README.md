@@ -342,7 +342,10 @@ config.sh                   packaged DEFAULTS for every knob. Do not edit —
 templates/config.sh         the .ralph/config.sh starter `ralph init` copies,
                             with a recipe per language
 link-skills.sh              link /implement, /tdd, /code-review from the
-                            mattpocock-skills plugin into ~/.claude/skills
+                            mattpocock-skills plugin, and ralph's own skill from
+                            this install, into ~/.claude/skills
+skills/ralph/               the /ralph skill: operating the loop, reading a stop
+                            outcome, and changing ralph itself
 run.sh                      ← the continuous loop you start and Ctrl-C to stop
 process-issue.sh            one issue, end to end (implement → PR → review)
 resolve-conflicts.sh        rebase a PR onto the base, resolve, re-review
