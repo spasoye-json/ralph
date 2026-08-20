@@ -14,7 +14,7 @@
 # Each review and each resolve is a separate `claude -p` process, so neither
 # inherits the other's context — the reviewer stays unbiased by construction.
 # The /implement and /code-review skills come from the mattpocock-skills
-# plugin, linked into ~/.claude/skills by ralph/link-skills.sh and left
+# plugin, linked into ~/.claude/skills by ralph link-skills and left
 # untouched.
 #
 # Usage:  ralph/process-issue.sh <issue-number>

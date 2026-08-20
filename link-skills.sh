@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ralph/link-skills.sh — make the /implement, /tdd and /code-review skills
+# ralph link-skills — make the /implement, /tdd and /code-review skills
 # resolve as personal skills (~/.claude/skills), sourced from the newest
 # installed mattpocock-skills Claude Code plugin. Personal-skill symlinks
 # resolve identically on the host and inside the implementer sandbox (lib.sh

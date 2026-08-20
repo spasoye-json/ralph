@@ -126,38 +126,69 @@ without a budget the breaker cannot see it burning tokens. With a budget set,
 each grind terminates, records a fail outcome, and consecutive grinds trip
 `RALPH_MAX_HANDBACKS` as intended.
 
-## Install (template)
+## Install
 
-This repo is a copy template: drop it into a project as a `ralph/` directory
-and edit one config file. It is **language and framework agnostic** — it drives
-GitHub, git and claude, and shells out to your toolchain through command strings
-in `config.sh`. Node, Go, Rust, Python, Ruby, JVM and mixed monorepos all work;
-`config.sh` carries a copy-paste recipe for each.
+Ralph installs as a package. Nothing is copied into your repo except one config
+file, so taking a new version is `npm update`, not a re-copy and a manual diff.
+It is **language and framework agnostic** — it drives GitHub, git and claude,
+and shells out to your toolchain through command strings in `.ralph/config.sh`.
+Node, Go, Rust, Python, Ruby, JVM and mixed monorepos all work; the starter
+config carries a copy-paste recipe for each.
 
-1. `npx degit spasoye-json/ralph ralph` (from your project root).
-2. Edit `ralph/config.sh`: base branch, labels, `TEST_DIR`, and your toolchain
-   commands (`SETUP_CMD`, `LINT_CMD`, `TEST_CMD`, `AUDIT_CMD`) plus the
-   dependency caches the sandbox mounts (`RALPH_DEP_DIRS`,
-   `RALPH_CACHE_MOUNTS`). Start from the recipe for your stack at the bottom of
-   that file.
-3. `cp ralph/.env.example ralph/.env` and set `CLAUDE_CODE_OAUTH_TOKEN`
-   (`claude setup-token`), used only by the sandboxed implementer.
-4. Create the labels:
+1. Install it. Per repo, so the version is pinned in your lockfile along with
+   everything else:
+
+   ```bash
+   npm install --save-dev github:spasoye-json/ralph
+   ```
+
+   Or once for every repo on the machine:
+
+   ```bash
+   npm install --global github:spasoye-json/ralph
+   ```
+
+   A local install puts `ralph` on PATH inside npm scripts and under `npx`; a
+   global install puts it on your shell PATH. Take a later version with
+   `npm update ralph-afk`.
+2. `npx ralph init` — writes `.ralph/config.sh`, `.ralph/.env` and
+   `.ralph/.gitignore` in the repo root. Commit `config.sh`. The other two stay
+   out of git.
+3. Edit `.ralph/config.sh`: base branch, `TEST_DIR`, your toolchain commands
+   (`SETUP_CMD`, `LINT_CMD`, `TEST_CMD`, `AUDIT_CMD`), the dependency caches the
+   sandbox mounts (`RALPH_DEP_DIRS`, `RALPH_CACHE_MOUNTS`) and
+   `RALPH_SANDBOX_BASE`. Start from the recipe for your stack in that file.
+   Write only what differs from the defaults — `npx ralph config` prints every
+   resolved value and where it came from.
+4. Put `CLAUDE_CODE_OAUTH_TOKEN` in `.ralph/.env` (`claude setup-token`). Only
+   the sandboxed implementer uses it; the host stages use your logged-in
+   `~/.claude`.
+5. Create the labels:
    `for l in ready-for-agent claude-working ready-for-human; do gh label create "$l"; done`
-5. Build the sandbox image for your toolchain, e.g.
-   `docker build -t ralph-impl --build-arg BASE_IMAGE=golang:1.23-bookworm ralph/sandbox`.
-   The `BASE_IMAGE` build arg picks the language; `EXTRA_PACKAGES` and
-   `SETUP_SNIPPET` add anything else your gate needs.
-6. Install the skills:
+6. `npx ralph sandbox-build` — builds the writer sandbox from
+   `RALPH_SANDBOX_BASE`. The `EXTRA_PACKAGES` and `SETUP_SNIPPET` build args add
+   anything else your gate needs.
+7. Install the skills:
    `claude plugin install mattpocock-skills@claude-plugins-official`, then
-   `./ralph/link-skills.sh`. The script links `/implement`, `/tdd` and
-   `/code-review` from the plugin into `~/.claude/skills/` so they resolve on
-   the host and inside the sandbox. Re-run it after a plugin update.
-7. Host requirements: branch protection on
-   the base branch requiring your lint+test check, with repo
-   delete-branch-on-merge enabled; `claude`, `gh` (authenticated), `docker`,
-   `jq`, and `flock` on PATH.
-8. Smoke test: `./ralph/eval.sh` (offline, free), then `./ralph/status.sh`.
+   `npx ralph link-skills`. It links `/implement`, `/tdd` and `/code-review`
+   from the plugin into `~/.claude/skills/` so they resolve on the host and
+   inside the sandbox. Re-run it after a plugin update.
+8. Protect the base branch: require your lint+test check, and turn on
+   delete-branch-on-merge for the repo.
+9. `npx ralph doctor` checks everything else — `claude`, `gh` authenticated,
+   `docker` running, `jq`, `flock`, the three skills. Then `npx ralph eval`
+   (offline and free) and `npx ralph status`.
+
+### Install vs. state
+
+`ralph home` is the **install**: these scripts, the sandbox Dockerfile, the eval
+cases, the packaged config defaults. Ralph never writes there, so `npm update`
+can replace it wholesale.
+
+`.ralph/` in the repo you run from is the **state**: `config.sh` (committed),
+plus `.env` and `logs/` with the metrics (both gitignored). One install
+therefore drives every repo on the machine, and reinstalling ralph can never
+wipe a project's throughput history. Set `RALPH_STATE` to put it elsewhere.
 
 > **GNU/Linux only.** The scripts rely on GNU `grep -P`, gawk `IGNORECASE`,
 > GNU `date -d`, and `flock`. On macOS `parse_blockers` and `pr_fields`
@@ -166,8 +197,8 @@ in `config.sh`. Node, Go, Rust, Python, Ruby, JVM and mixed monorepos all work;
 ## Run
 
 ```bash
-DRY_RUN=1 ./ralph/run.sh   # list what it would pick up right now, then exit
-./ralph/run.sh             # continuous loop; runs until you Ctrl-C or kill it
+DRY_RUN=1 ralph run   # list what it would pick up right now, then exit
+ralph run             # continuous loop; runs until you Ctrl-C or kill it
 ```
 
 `run.sh` takes a `flock` lock, so a second concurrent instance exits rather
@@ -188,7 +219,7 @@ still-running loop with queued work) picks up.
 
 Eligible issues are worked in **ascending issue-number order**: the safe
 filters (label, not blocked, no open PR) decide the candidate set, and the
-lowest number goes first. `DRY_RUN=1 ./ralph/run.sh` prints the issues it
+lowest number goes first. `DRY_RUN=1 ralph run` prints the issues it
 would pick up.
 
 Each **agent stage runs on a fixed model** (see Tunables): the writing stages
@@ -253,11 +284,11 @@ work happens on the host. Network stays on (claude must reach the API), so
 this stops host damage and credential theft, not network exfiltration.
 
 One-time build, then drop the token the sandboxed claude authenticates with
-into a gitignored `ralph/.env` (auto-loaded by ralph):
+into the gitignored `.ralph/.env` that `ralph init` wrote (auto-loaded by ralph):
 
 ```bash
-docker build -t ralph-impl ralph/sandbox   # rebuild if you edit the Dockerfile
-cp ralph/.env.example ralph/.env           # then set CLAUDE_CODE_OAUTH_TOKEN (or ANTHROPIC_API_KEY)
+ralph sandbox-build          # builds from RALPH_SANDBOX_BASE; re-run after a Dockerfile change
+$EDITOR .ralph/.env          # set CLAUDE_CODE_OAUTH_TOKEN (or ANTHROPIC_API_KEY)
 ```
 
 The token is only needed for the sandboxed writers; the host stages
@@ -295,24 +326,37 @@ cycle after you merge its blocker.
 <host repo>/.claude/settings.json allowlist; lib.sh reads it and passes it to each
                             claude -p via --allowedTools (project settings are
                             ignored inside the untrusted per-issue worktrees)
-ralph/config.sh             ← the config seam: labels, base branch, gate dir and
-                            toolchain commands, sandbox image, dep-cache mounts
-ralph/link-skills.sh        link /implement, /tdd, /code-review from the
+<host repo>/.ralph/config.sh      ← the config seam: labels, base branch, gate dir
+                            and toolchain commands, sandbox base image,
+                            dep-cache mounts. Committed.
+<host repo>/.ralph/.env           CLAUDE_CODE_OAUTH_TOKEN for the sandboxed
+                            implementer. Gitignored.
+<host repo>/.ralph/logs/          metrics.csv, per-run logs, the run lock.
+                            Gitignored.
+
+--- the install (`ralph home`), never written to ---
+bin/ralph                   ← the one entry point: run, status, config, init,
+                            doctor, sandbox-build, link-skills, eval
+config.sh                   packaged DEFAULTS for every knob. Do not edit —
+                            .ralph/config.sh overrides it and survives updates
+templates/config.sh         the .ralph/config.sh starter `ralph init` copies,
+                            with a recipe per language
+link-skills.sh              link /implement, /tdd, /code-review from the
                             mattpocock-skills plugin into ~/.claude/skills
-ralph/run.sh                ← the continuous loop you start and Ctrl-C to stop
-ralph/process-issue.sh      one issue, end to end (implement → PR → review)
-ralph/resolve-conflicts.sh  rebase a PR onto the base, resolve, re-review
-ralph/threads.sh            count unresolved review threads (the verdict)
-ralph/status.sh             live snapshot: queue, open PRs, throughput
-ralph/eval.sh               offline regression gate for the learning/guard logic
-ralph/eval-agents.sh        OPT-IN agent-output quality harness (real /implement, no GitHub writes)
-ralph/eval/                 fixtures: secret cases, agent-cases/
-ralph/lib.sh                config + helpers + review_and_resolve (sourced)
-ralph/.gitignore            ignores logs/ (metrics)
+run.sh                      ← the continuous loop you start and Ctrl-C to stop
+process-issue.sh            one issue, end to end (implement → PR → review)
+resolve-conflicts.sh        rebase a PR onto the base, resolve, re-review
+threads.sh                  count unresolved review threads (the verdict)
+status.sh                   live snapshot: queue, open PRs, throughput
+eval.sh                     offline regression gate for the learning/guard logic
+eval-agents.sh              OPT-IN agent-output quality harness (real /implement, no GitHub writes)
+eval/                       fixtures: secret cases, agent-cases/
+lib.sh                      config + helpers + review_and_resolve (sourced)
+sandbox/Dockerfile          the writer sandbox, BASE_IMAGE picks the toolchain
 ```
 
 The `/implement`, `/tdd`, and `/code-review` skills come from the
-mattpocock-skills plugin. `ralph/link-skills.sh` links them into
+mattpocock-skills plugin. `ralph link-skills` links them into
 `~/.claude/skills/` and never edits them; the sandbox mounts the link targets
 read-only.
 
@@ -338,52 +382,52 @@ definitions out of context. The CLI flag is probed once at startup and
 
 ```bash
 # polling & concurrency
-POLL_INTERVAL=900   ./ralph/run.sh     # idle poll ceiling, 15 min (default 1800 = 30 min)
-POLL_MIN=60         ./ralph/run.sh     # fast poll floor while busy (default 120 = 2 min)
-POLL_BACKOFF=3      ./ralph/run.sh     # idle backoff multiplier toward the ceiling (default 2)
-RALPH_CONCURRENCY=2 ./ralph/run.sh     # issues implemented in parallel (default 1 = sequential)
+POLL_INTERVAL=900   ralph run     # idle poll ceiling, 15 min (default 1800 = 30 min)
+POLL_MIN=60         ralph run     # fast poll floor while busy (default 120 = 2 min)
+POLL_BACKOFF=3      ralph run     # idle backoff multiplier toward the ceiling (default 2)
+RALPH_CONCURRENCY=2 ralph run     # issues implemented in parallel (default 1 = sequential)
 
 # review cycles, timeout, base (approved PRs are un-drafted and wait for your merge)
-MAX_REVIEW_CYCLES=8 ./ralph/run.sh     # review<->resolve rounds (default 5)
-AGENT_TIMEOUT=7200  ./ralph/run.sh     # allow 2h per agent (default 3600 = 1h)
-BASE_BRANCH=develop ./ralph/run.sh     # default main (set in config.sh)
+MAX_REVIEW_CYCLES=8 ralph run     # review<->resolve rounds (default 5)
+AGENT_TIMEOUT=7200  ralph run     # allow 2h per agent (default 3600 = 1h)
+BASE_BRANCH=develop ralph run     # default main (set in config.sh)
 
 # per-stage models (CLI --model alias or full ID; empty = your CLI default)
-MODEL_IMPLEMENT=claude-opus-5 ./ralph/run.sh # implementation (default claude-opus-5)
-MODEL_REVIEW=claude-fable-5 ./ralph/run.sh  # quality review (default claude-fable-5)
-MODEL_FIX=claude-opus-5    ./ralph/run.sh   # apply review fixes (default claude-opus-5)
-MODEL_CONFLICT=claude-opus-5 ./ralph/run.sh # resolve rebase conflicts (default claude-opus-5)
-MODEL_PR=claude-opus-5     ./ralph/run.sh   # author the PR title and body (default claude-opus-5)
+MODEL_IMPLEMENT=claude-opus-5 ralph run # implementation (default claude-opus-5)
+MODEL_REVIEW=claude-fable-5 ralph run  # quality review (default claude-fable-5)
+MODEL_FIX=claude-opus-5    ralph run   # apply review fixes (default claude-opus-5)
+MODEL_CONFLICT=claude-opus-5 ralph run # resolve rebase conflicts (default claude-opus-5)
+MODEL_PR=claude-opus-5     ralph run   # author the PR title and body (default claude-opus-5)
 
 # gates
-RALPH_TEST_GATE=0   ./ralph/run.sh     # disable the objective lint+test gate (default 1)
-TEST_DIR=packages/app ./ralph/run.sh   # package dir the gate runs in (default . as set in config.sh)
-LINT_CMD="go vet ./..." ./ralph/run.sh # lint command for the gate (empty = skipped)
-TEST_CMD="go test ./..." ./ralph/run.sh # test command for the gate (empty = skipped)
-SETUP_CMD="go mod download" ./ralph/run.sh # dependency install before the gate (empty = skipped)
-RALPH_SECRET_SCAN=0 ./ralph/run.sh     # disable the pre-merge secret scan (default 1)
-RALPH_AUDIT=1       ./ralph/run.sh     # run the advisory AUDIT_CMD from config.sh (default 0; never blocks)
+RALPH_TEST_GATE=0   ralph run     # disable the objective lint+test gate (default 1)
+TEST_DIR=packages/app ralph run   # package dir the gate runs in (default . as set in config.sh)
+LINT_CMD="go vet ./..." ralph run # lint command for the gate (empty = skipped)
+TEST_CMD="go test ./..." ralph run # test command for the gate (empty = skipped)
+SETUP_CMD="go mod download" ralph run # dependency install before the gate (empty = skipped)
+RALPH_SECRET_SCAN=0 ralph run     # disable the pre-merge secret scan (default 1)
+RALPH_AUDIT=1       ralph run     # run the advisory AUDIT_CMD from config.sh (default 0; never blocks)
 
 # MCP trimming
-RALPH_TRIM_MCP=0    ./ralph/run.sh     # keep ambient MCP servers loaded per stage (default 1 = trim them off)
+RALPH_TRIM_MCP=0    ralph run     # keep ambient MCP servers loaded per stage (default 1 = trim them off)
 
 # metrics
-METRICS_FILE=logs/metrics.csv ./ralph/run.sh # per-issue outcome log, gitignored (default logs/metrics.csv)
+METRICS_FILE=logs/metrics.csv ralph run # per-issue outcome log, gitignored (default logs/metrics.csv)
 
 # AFK / retry-until-green
-RALPH_AFK=0           ./ralph/run.sh     # 0 = legacy hand-back-on-failure; 1 = retry until green (default)
-RALPH_MAX_ATTEMPTS=0  ./ralph/run.sh     # cap attempts per issue: implementer + review + failed verifier rounds (default 8; 0 = unlimited)
-RALPH_INFRA_RETRIES=5 ./ralph/run.sh     # consecutive /implement crashes tolerated before declaring an infra error (default 3)
-RALPH_ISSUE_BUDGET=14400 ./ralph/run.sh  # per-issue wall-clock budget in seconds (default 7200; 0 = off); on hit the issue is re-queued, not handed back
+RALPH_AFK=0           ralph run     # 0 = legacy hand-back-on-failure; 1 = retry until green (default)
+RALPH_MAX_ATTEMPTS=0  ralph run     # cap attempts per issue: implementer + review + failed verifier rounds (default 8; 0 = unlimited)
+RALPH_INFRA_RETRIES=5 ralph run     # consecutive /implement crashes tolerated before declaring an infra error (default 3)
+RALPH_ISSUE_BUDGET=14400 ralph run  # per-issue wall-clock budget in seconds (default 7200; 0 = off); on hit the issue is re-queued, not handed back
 
 # circuit breaker
-RALPH_MAX_HANDBACKS=10 ./ralph/run.sh    # stop after N consecutive handbacks (default 6; 0 = disabled)
-RALPH_MAX_INFRA_ERRORS=3 ./ralph/run.sh  # stop after N consecutive infra errors (default 2; 0 = disabled)
+RALPH_MAX_HANDBACKS=10 ralph run    # stop after N consecutive handbacks (default 6; 0 = disabled)
+RALPH_MAX_INFRA_ERRORS=3 ralph run  # stop after N consecutive infra errors (default 2; 0 = disabled)
 ```
 
 ## Regression gate
 
-`./ralph/eval.sh` is an offline harness (no agents, no network) that pins the
+`ralph eval` is an offline harness (no agents, no network) that pins the
 deterministic guard logic, meaning the capability boundary, the
 correctness-verdict parse, the escalation sentinel, and the secret scan,
 against labeled fixtures (`ralph/eval/`). A small eval harness is the
@@ -391,7 +435,7 @@ highest-leverage thing you can build here: *without it you're optimizing by
 vibes.* Run it before and after touching any guard or prompt logic; it exits
 non-zero on any failure, so it works as a pre-push or CI check.
 
-`./ralph/eval.sh` pins the *bash*; `./ralph/eval-agents.sh` measures the
+`ralph eval` pins the *bash*; `ralph eval-agents` measures the
 *agent*. It is **opt-in** (real tokens) and runs the real `/implement` against
 a frozen fixture suite (`ralph/eval/agent-cases/`, ~14 cases spanning utils,
 an array and string mix, a bugfix-with-regression-test, a component-style
@@ -407,9 +451,9 @@ GitHub** (no push, PR, or issue edits) and exits non-zero if any fixture's
 outcome misses its `expect-gate`, so it doubles as a manual quality gate.
 
 ```bash
-./ralph/eval-agents.sh --list          # parse + list fixtures, run nothing (free)
-./ralph/eval-agents.sh round-to        # run one named fixture (cheap)
-./ralph/eval-agents.sh                 # run the whole suite once
+ralph eval-agents --list          # parse + list fixtures, run nothing (free)
+ralph eval-agents round-to        # run one named fixture (cheap)
+ralph eval-agents                 # run the whole suite once
 ```
 
 This is the **standing regression baseline** for prompt and model changes: run
