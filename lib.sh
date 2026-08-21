@@ -676,6 +676,13 @@ worktree_leave() {
   return 0
 }
 
+# worktree_enter_branch <dir> <branch> <ilog> — enter <dir> on an EXISTING pushed
+# branch, resetting the local ref to origin/<branch> and fetching the base too, so
+# a resumed PR is worked on its own commits instead of a fresh cut of the base.
+worktree_enter_branch() {
+  worktree_enter "$1" -B "$2" "origin/$2" "$3" "$BASE_BRANCH" "$2"
+}
+
 # --- Issue queue (GitHub label transitions) ----------------------------------------
 # The label lifecycle has exactly two writers: claim (READY -> WORKING, strict —
 # a failed claim must abort before any work starts) and release (WORKING -> the
@@ -751,12 +758,19 @@ is_blocked() {
   return 1       # not blocked
 }
 
-# True if issue N already has an open PR on its Ralph branch (issue/N). Such
-# issues are handled by run.sh's maintenance sweep, never re-picked for new work.
-has_open_pr() {
-  local n="$1"
-  [ -n "$(gh pr list --head "issue/$n" --state open --json number -q '.[].number' 2>/dev/null)" ]
+# open_pr_num <n> -> the number of the OPEN PR on issue/<n>, empty if none. The
+# --state filter is load-bearing: `gh pr view <branch>` without it falls back to
+# the most recent PR on the branch, a MERGED one included.
+# pipefail-safe: gh failing (or SIGPIPE from head) must read as "no open PR",
+# never abort the caller mid-command-substitution.
+open_pr_num() {
+  { gh pr list --head "issue/$1" --state open --json number -q '.[].number' 2>/dev/null || true; } | head -n1
 }
+
+# True if issue N already has an open PR on its Ralph branch (issue/N). run.sh
+# never re-picks such an issue for new work (the sweeps own it); a hand-run
+# `ralph process-issue N` RESUMES it.
+has_open_pr() { [ -n "$(open_pr_num "$1")" ]; }
 
 # --- PR Ralph-state (one classifier + one thin gh adapter) -------------------
 # The PR's Ralph-state used to be reconstructed ad hoc at ~6 sites from up to 7

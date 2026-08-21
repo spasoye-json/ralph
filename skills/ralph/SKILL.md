@@ -31,6 +31,7 @@ one run.
 ralph doctor              # prerequisites: gh auth, docker, jq, flock, the three skills
 ralph run --dry           # what the queue would pick up right now, then exit
 ralph process-issue 40    # ONE issue, end to end; it claims the label itself
+                          # an issue whose PR is already open RESUMES that PR
 ralph run                 # drain the queue and every stranded review, then exit
 ralph status              # queue, open PRs, throughput from .ralph/logs/metrics.csv
 ```
@@ -54,9 +55,10 @@ a gate blind to the diff is worse than no gate: it reports a pass it never
 checked.
 
 **Worktrees come from the base branch.** `ralph process-issue` cuts `../wt-<n>`
-from `BASE_BRANCH`, so everything the gate calls - an npm script, an eslint
-ignore, a Makefile target - must be committed and pushed there first. A gate
-command that exists only on your feature branch dies with `Missing script`.
+from `BASE_BRANCH` (from `origin/issue/<n>` when it resumes an open PR), so
+everything the gate calls - an npm script, an eslint ignore, a Makefile target -
+must be committed and pushed there first. A gate command that exists only on
+your feature branch dies with `Missing script`.
 
 ## Diagnose a stop
 

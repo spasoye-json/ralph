@@ -48,19 +48,30 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Never clobber a branch that already carries an open PR (worktree_enter -b would
-# delete and recreate it).
-if git show-ref --quiet "refs/heads/$branch" && has_open_pr "$n"; then
-  log "#$n: $branch already has an open PR — skipping to avoid clobbering it"
-  issue_release "$n" "$HUMAN_LABEL"
-  exit 1
+# An open PR on this issue means an earlier run already pushed work, so RESUME
+# that branch: skip the build-from-scratch and the PR creation, and re-enter at
+# the gate + verify + review stages below. The old guard also required a local
+# refs/heads/$branch, but cleanup() deletes that ref on every exit — so a second
+# hand-run re-cut the branch from $BASE_BRANCH, silently abandoned the PR's
+# commits, and then reviewed the open PR against work it never pushed.
+RESUME_NUM="$(open_pr_num "$n")"
+RESUME_PR=""
+if [ -n "$RESUME_NUM" ]; then
+  RESUME_PR="$(gh pr view "$RESUME_NUM" --json url -q .url 2>/dev/null || echo "$RESUME_NUM")"
+  log "#$n: open PR $RESUME_PR (state: $(pr_state "$RESUME_NUM" || echo unreadable)) — resuming it"
 fi
 
-# worktree_enter fetches origin/$BASE_BRANCH first so the worktree branches from
-# the latest master, not a stale local ref, and fails rather than silently
+# worktree_enter fetches the refs first, so the worktree is cut from the latest
+# origin state rather than a stale local ref, and fails rather than silently
 # building on a stale base.
-log "#$n: creating worktree $wt on $branch (from origin/$BASE_BRANCH)"
-if ! worktree_enter "$wt" -b "$branch" "origin/$BASE_BRANCH" "$ilog" "$BASE_BRANCH"; then
+if [ -n "$RESUME_PR" ]; then
+  log "#$n: creating worktree $wt on $branch (from origin/$branch)"
+  worktree_enter_branch "$wt" "$branch" "$ilog" && wrc=0 || wrc=$?
+else
+  log "#$n: creating worktree $wt on $branch (from origin/$BASE_BRANCH)"
+  worktree_enter "$wt" -b "$branch" "origin/$BASE_BRANCH" "$ilog" "$BASE_BRANCH" && wrc=0 || wrc=$?
+fi
+if [ "$wrc" != 0 ]; then
   log "#$n: worktree setup failed (fetch or worktree add — see issue-$n.log)"
   issue_release "$n" "$HUMAN_LABEL"
   exit 1
@@ -169,17 +180,39 @@ route_build_rc() {
   esac
 }
 
+# rebuild_or_stop <feedback> <cap-outcome> — re-run build_until_green (the verifier
+# or reviewer asked for more implementation work) and route its terminal codes.
+# Returns to the caller only on success (gate green), having pushed the new commits.
+rebuild_or_stop() {
+  local fb="$1" cap_outcome="$2" rc
+  build_until_green "$fb" && rc=0 || rc=$?
+  route_build_rc "$rc" "$cap_outcome" "during a fix loop"
+  git push origin "$branch" >>"$ilog" 2>&1 || true
+}
+
 # --- 1. Build until the objective gate is green ------------------------------
-log "#$n: /implement starting — building until lint+tests pass"
 # Fetch the issue on the host and inject it, so the sandboxed implementer needs no
 # gh and no GitHub token inside the container.
 issue_ctx="$(gh issue view "$n" --json title,body \
   -q '"## Issue #'"$n"': " + .title + "\n\n" + (.body // "_(no description)_")' 2>/dev/null || true)"
 
-build_until_green "The issue to implement:
+if [ -n "$RESUME_PR" ]; then
+  # The resumed branch already carries an implementation, so the implementer only
+  # runs if the objective gate is red. A green gate goes straight to verify+review.
+  log "#$n: resuming — running the objective gate on the pushed branch"
+  if ! run_quality_gate "$ilog"; then
+    log "#$n: resumed branch has lint/tests red — rebuilding until green"
+    rebuild_or_stop "The branch for issue #$n has lint or tests FAILING in $TEST_DIR. Fix them until $(gate_cmds_text) pass.
+
+$issue_ctx" test-fail
+  fi
+else
+  log "#$n: /implement starting — building until lint+tests pass"
+  build_until_green "The issue to implement:
 
 $issue_ctx" && bg=0 || bg=$?
-route_build_rc "$bg" test-fail "before lint/tests passed"
+  route_build_rc "$bg" test-fail "before lint/tests passed"
+fi
 
 # Accidental-secret gate (SAFETY, not quality): never open a PR whose diff leaks a
 # high-confidence secret. This is the one quality-independent hard stop that
@@ -189,8 +222,8 @@ if ! run_safety_scan "$ilog"; then
 fi
 
 # --- 2. Open the PR up front (agent-authored title + body) -------------------
-log "#$n: pushing branch and drafting PR"
-git push -u origin "$branch" >>"$ilog" 2>&1
+# On a resume the PR is already open, so this whole stage is skipped: pr_url is
+# the PR found above, and rebuild_or_stop has already pushed any new commits.
 
 # Let an agent author the PR so it matches the repo's house style instead of a
 # canned stub. It reads the issue + the diff and mirrors recent merged PRs. A
@@ -212,13 +245,19 @@ The body MUST end with a line 'Closes #$n'." \
   pr_url="$(gh pr view "$branch" --json url,state -q 'select(.state=="OPEN") | .url' 2>/dev/null || true)"
   [ -n "$pr_url" ]
 }
-pr_tries=0
-until create_pr; do
-  pr_tries=$((pr_tries+1))
-  [ "$pr_tries" -ge "${RALPH_INFRA_RETRIES:-3}" ] && \
-    stop_issue pr-failed 3 "PR-author created no PR on $branch after ${pr_tries} tries (infra error)"
-  log "#$n: PR not created — retrying PR author (try $pr_tries)"
-done
+if [ -n "$RESUME_PR" ]; then
+  pr_url="$RESUME_PR"
+else
+  log "#$n: pushing branch and drafting PR"
+  git push -u origin "$branch" >>"$ilog" 2>&1
+  pr_tries=0
+  until create_pr; do
+    pr_tries=$((pr_tries+1))
+    [ "$pr_tries" -ge "${RALPH_INFRA_RETRIES:-3}" ] && \
+      stop_issue pr-failed 3 "PR-author created no PR on $branch after ${pr_tries} tries (infra error)"
+    log "#$n: PR not created — retrying PR author (try $pr_tries)"
+  done
+fi
 log "#$n: PR $pr_url"
 
 # Backstop the agent-authored body: the blocker gate (lib.sh) only releases a
@@ -233,16 +272,6 @@ if ! body_closes_issue "$pr_body" "$n"; then
   gh pr edit "$pr_url" --body "$(printf '%s\n\nCloses #%s' "$pr_body" "$n")" >>"$ilog" 2>&1 \
     || log "#$n: could not append Closes trailer (gh pr edit failed)"
 fi
-
-# rebuild_or_stop <feedback> <cap-outcome> — re-run build_until_green (the verifier
-# or reviewer asked for more implementation work) and route its terminal codes.
-# Returns to the caller only on success (gate green), having pushed the new commits.
-rebuild_or_stop() {
-  local fb="$1" cap_outcome="$2" rc
-  build_until_green "$fb" && rc=0 || rc=$?
-  route_build_rc "$rc" "$cap_outcome" "during a fix loop"
-  git push origin "$branch" >>"$ilog" 2>&1 || true
-}
 
 # --- 3. Correctness gate: retry until the change actually solves the ticket --
 # A fresh, independent, read-only verifier judges the diff against the issue's

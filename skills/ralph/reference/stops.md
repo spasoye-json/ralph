@@ -71,3 +71,8 @@ something CI runs.
 **`budget-exceeded`** - `RALPH_ISSUE_BUDGET` seconds elapsed. The issue is
 **re-queued**, not handed back, and the fail outcome counts toward the circuit
 breaker. One ticket eating the budget twice is a ticket to split.
+
+A stop that leaves the PR open does not lose the work. `ralph process-issue <n>`
+resumes an open PR: it re-enters at the gate, the correctness check and the
+review loop, and never re-implements from the base. Raise the budget on the
+resume run, because the second run starts its own budget.

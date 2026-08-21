@@ -306,6 +306,43 @@ PATH="$stubd:$PATH" GH_STUB_MARKER=0 approve_pr "https://example/pr/42" 7 /dev/n
 grep -q '^comment' "$GH_STUB_LOG" && ok || bad "approve_pr must post the marker when absent"
 rm -rf "$stubd"
 
+# --- 13. resume an issue whose PR is already open (stubbed gh + source) ------------
+# Pins the regression: a hand-run `ralph process-issue N` used to gate the
+# open-PR check on a LOCAL refs/heads/issue/N, which cleanup() deletes on every
+# exit — so the second run re-cut the branch from the base and abandoned the
+# PR's commits. The decision must come from the PR listing alone.
+printf '== resume on an open PR (open_pr_num + process-issue) ==\n'
+stubd="$(mktemp -d)"
+cat > "$stubd/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "pr list")
+    case "${GH_STUB_PRS:-none}" in
+      none) : ;;
+      fail) exit 1 ;;
+      *)    printf '%s\n' $GH_STUB_PRS ;;
+    esac ;;
+  *) : ;;
+esac
+STUB
+chmod +x "$stubd/gh"
+opn() { PATH="$stubd:$PATH" GH_STUB_PRS="$1" open_pr_num 62; }
+hop() { PATH="$stubd:$PATH" GH_STUB_PRS="$1" has_open_pr 62 && echo yes || echo no; }
+[ -z "$(opn none)" ]        && ok || bad "no open PR must read empty"
+[ "$(opn 70)" = 70 ]        && ok || bad "one open PR must read its number"
+[ "$(opn '70 71')" = 70 ]   && ok || bad "several open PRs must read the first (no pipefail abort)"
+[ -z "$(opn fail)" ]        && ok || bad "a failing gh must read empty, not abort"
+[ "$(hop none)" = no ]      && ok || bad "has_open_pr must agree with open_pr_num (none)"
+[ "$(hop 70)" = yes ]       && ok || bad "has_open_pr must agree with open_pr_num (open)"
+rm -rf "$stubd"
+pi="$HERE/process-issue.sh"
+grep -q 'RESUME_PR="\$(gh pr view' "$pi" \
+  && ok || bad "process-issue must resolve the open PR into RESUME_PR"
+grep -q 'worktree_enter_branch "\$wt"' "$pi" \
+  && ok || bad "a resumed issue must branch from origin/issue/N, not the base"
+! grep -q 'show-ref --quiet "refs/heads/\$branch"' "$pi" \
+  && ok || bad "the resume decision must not depend on a local branch ref (cleanup deletes it)"
+
 # --- summary --------------------------------------------------------------------
 printf '\n== eval: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

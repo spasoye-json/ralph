@@ -260,7 +260,17 @@ un-drafted only on approval, a **non-draft** `issue/*` PR reliably means
 approved, mergeable PR whose required CI check is **failing** would sit
 unmergeable on your desk, so it is handed back explicitly: re-drafted, title
 prefixed, issue relabeled. Issues that already have an open PR are **never
-re-picked** for fresh work.
+re-picked** for fresh work by the loop.
+
+`ralph process-issue <n>` by hand is the exception: it looks the issue's open
+PR up first, and when one exists it **resumes** that PR instead of starting
+over. The worktree is cut from `origin/issue/<n>` rather than the base, the
+build-from-scratch stage and the PR creation are skipped, and the issue
+re-enters at the objective gate (a red gate earns the full build loop), then
+correctness verification and the review loop. This is how you continue a ticket
+that ran out of `RALPH_ISSUE_BUDGET` mid-review. The decision rests on the PR
+listing alone: it must not depend on a local `issue/<n>` ref, because ralph
+deletes that ref when it leaves the worktree.
 
 > Issues are processed up to `RALPH_CONCURRENCY` at a time (default 1 =
 > sequential), each branched from the latest `origin/<base>`. Several eligible
