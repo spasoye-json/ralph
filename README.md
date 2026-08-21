@@ -323,6 +323,22 @@ The token is only needed for the sandboxed writers; the host stages
 (reviewer, PR author, verifier) use your logged-in `~/.claude`. A plain
 `export CLAUDE_CODE_OAUTH_TOKEN=...` in your shell works too.
 
+### Another provider
+
+The CLI can be pointed at any Anthropic-compatible endpoint, so ralph can be
+too. Put the endpoint and its key in `.ralph/.env`, which is exported for every
+stage, and set `MODEL_IMPLEMENT`, `MODEL_REVIEW` and `MODEL_VERIFY` to that
+provider's model ids so the logs name what actually ran. `RALPH_SANDBOX_ENV` is
+the list of variable NAMES the writer sandbox inherits; the Anthropic and
+Claude-Code variables are already on it, so a switch usually needs no code
+change. Values are never put on the docker command line, and an unset name is
+dropped rather than passed empty. The container reaches the network, so a remote
+endpoint works from inside the sandbox.
+
+Expect the loop's behaviour to move with the model. The reviewer's memory lives
+on the PR, so a round run on a different provider still reads what the earlier
+rounds decided, but the judgement applying it is not the same judgement.
+
 `process-issue.sh` and `resolve-conflicts.sh` run a **preflight** before
 claiming any work: if docker,
 the `ralph-impl` image, or the token is missing it aborts loudly rather than

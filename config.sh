@@ -88,6 +88,19 @@ declare -p RALPH_DEP_DIRS >/dev/null 2>&1 || RALPH_DEP_DIRS=()
 # machine, which is the thing the sandbox exists to prevent.
 declare -p RALPH_CACHE_MOUNTS >/dev/null 2>&1 || RALPH_CACHE_MOUNTS=()
 
+# Environment variable NAMES the writer sandbox inherits from the host — the
+# agent's credentials and, when you point the CLI at an Anthropic-compatible
+# endpoint, the endpoint itself. Values never appear on the docker command line,
+# only names, and an unset name is dropped. Put the values in .ralph/.env, which
+# is gitignored and exported for you. Add a name here to run the sandboxed
+# implementer against another provider.
+declare -p RALPH_SANDBOX_ENV >/dev/null 2>&1 || RALPH_SANDBOX_ENV=(
+  CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL
+  ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL
+  ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_SMALL_FAST_MODEL
+  CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_EFFORT_LEVEL CLAUDE_CODE_AUTO_COMPACT_WINDOW
+)
+
 # Per-language recipes (npm, pnpm, Go, Rust, Python, Ruby, JVM) are in the
 # starter file `ralph init` writes to .ralph/config.sh, next to the values you
 # actually edit. `ralph init --print` prints it without writing.

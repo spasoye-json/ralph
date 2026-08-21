@@ -306,6 +306,23 @@ PATH="$stubd:$PATH" GH_STUB_MARKER=0 approve_pr "https://example/pr/42" 7 /dev/n
 grep -q '^comment' "$GH_STUB_LOG" && ok || bad "approve_pr must post the marker when absent"
 rm -rf "$stubd"
 
+# --- 12a. sandbox credential passthrough (offline, array-only) ---------------------
+# The writer sandbox must inherit the agent's credentials and endpoint BY NAME.
+# A value on the docker command line would land in the process table and in every
+# log that echoes the command, and an unset name passed anyway makes the CLI read
+# an empty value and fall back silently.
+printf '== sandbox env passthrough (sandbox_impl_cmd) ==\n'
+stub_out="$(mktemp)"
+( export ANTHROPIC_BASE_URL=https://example.invalid/anthropic ANTHROPIC_AUTH_TOKEN=tok-do-not-leak
+  unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_MODEL
+  declare -a sc; sandbox_impl_cmd /tmp/eval-wt sc
+  printf '%s\n' "${sc[@]}" > "$stub_out" )
+grep -qx 'ANTHROPIC_BASE_URL' "$stub_out"   && ok || bad "a set endpoint var must be passed by name"
+grep -qx 'ANTHROPIC_AUTH_TOKEN' "$stub_out" && ok || bad "a set credential var must be passed by name"
+! grep -q 'tok-do-not-leak' "$stub_out"     && ok || bad "a credential VALUE must never reach the docker command line"
+! grep -qx 'ANTHROPIC_API_KEY' "$stub_out"  && ok || bad "an unset var must be dropped, not passed empty"
+rm -f "$stub_out"; unset stub_out
+
 # --- 12b. review rounds: the reviewer's memory lives on the PR ---------------------
 # next_round/last_round_sha decide which round a pass claims and which commit it
 # diffs against. Getting either wrong un-does the convergence property: a repeated

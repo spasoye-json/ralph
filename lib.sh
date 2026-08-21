@@ -307,13 +307,22 @@ sandbox_impl_cmd() {
     --cap-drop ALL --security-opt no-new-privileges
     --tmpfs /tmp
     -e HOME=/home/agent
-    -e CLAUDE_CODE_OAUTH_TOKEN -e ANTHROPIC_API_KEY
     -e GIT_AUTHOR_NAME="$gname" -e GIT_AUTHOR_EMAIL="$gemail"
     -e GIT_COMMITTER_NAME="$gname" -e GIT_COMMITTER_EMAIL="$gemail"
     -v "$wt:$wt"
     -v "$REPO_ROOT/.git:$REPO_ROOT/.git"
     -w "$wt"
   )
+  # Credentials and endpoint reach the container by NAME only (bare -e), so no
+  # secret lands in the process table or in a log. The list is config, not code:
+  # pointing the CLI at an Anthropic-compatible endpoint is a matter of which
+  # vars travel, so a provider switch needs no change here. An unset name is
+  # dropped — a bare -e for a var the host does not have makes the CLI read an
+  # empty value and fall back, which is harder to diagnose than a missing one.
+  local _e
+  for _e in "${RALPH_SANDBOX_ENV[@]}"; do
+    [ -n "${!_e-}" ] && _sc_out+=( -e "$_e" )
+  done
   # The shared .git is rw so worktree commits land, but .git/config and .git/hooks
   # must stay read-only: an agent write there (core.fsmonitor, core.hooksPath, a
   # pre-push hook) would execute ON THE HOST the next time host-side git runs —
