@@ -195,7 +195,8 @@ rebuild_or_stop() {
   local fb="$1" cap_outcome="$2" rc
   build_until_green "$fb" && rc=0 || rc=$?
   route_build_rc "$rc" "$cap_outcome" "during a fix loop"
-  git push origin "$branch" >>"$ilog" 2>&1 || true
+  push_branch "$branch" "$n" "$ilog" || \
+    stop_issue pr-failed 3 "the rebuilt branch could not be pushed — the PR would review stale code (infra error; see issue-$n.log)"
 }
 
 # --- 1. Build until the objective gate is green ------------------------------
@@ -257,7 +258,9 @@ if [ -n "$RESUME_PR" ]; then
   pr_url="$RESUME_PR"
 else
   log "#$n: pushing branch and drafting PR"
-  git push -u origin "$branch" >>"$ilog" 2>&1
+  git push -u origin "$branch" >>"$ilog" 2>&1 || \
+    push_branch "$branch" "$n" "$ilog" || \
+    stop_issue pr-failed 3 "the branch could not be pushed, so no PR can be opened (infra error; see issue-$n.log)"
   pr_tries=0
   until create_pr; do
     pr_tries=$((pr_tries+1))

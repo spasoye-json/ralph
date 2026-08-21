@@ -692,6 +692,32 @@ worktree_enter_branch() {
   worktree_enter "$1" -B "$2" "origin/$2" "$3" "$BASE_BRANCH" "$2"
 }
 
+# push_branch <branch> <issue_n> <ilog> — publish the worktree's commits, and NEVER
+# swallow a failure. This used to be `git push origin "$branch" || true` at three
+# sites. A stage that rebases the branch (the conflict resolver, or an implementer
+# that tidies history) makes the next plain push non-fast-forward; it was rejected,
+# the `|| true` hid it, and the loop kept reviewing a PR head that no longer had
+# the fixes — so every round re-posted findings the code had already answered.
+#
+# A rejected push is retried ONCE with --force-with-lease. The lease is the safety
+# property: it fails rather than overwrite a commit that arrived on the remote
+# behind our back (a human pushing to the PR), which is the one case where forcing
+# would destroy work. Returns non-zero when the branch is still unpublished, and
+# the caller must treat that as a real failure, not a warning.
+push_branch() {
+  local branch="$1" n="$2" ilog="${3:-/dev/null}" lease
+  if git push origin "$branch" >>"$ilog" 2>&1; then return 0; fi
+  lease="$(git rev-parse "refs/remotes/origin/$branch" 2>/dev/null || true)"
+  log "#$n: push of $branch was rejected (history rewritten?) — retrying with --force-with-lease"
+  if [ -n "$lease" ]; then
+    git push --force-with-lease="refs/heads/$branch:$lease" origin "$branch" >>"$ilog" 2>&1 && return 0
+  else
+    git push --force-with-lease origin "$branch" >>"$ilog" 2>&1 && return 0
+  fi
+  log "#$n: PUSH FAILED — $branch is NOT published, so the PR does not contain these commits (see issue-$n.log)"
+  return 1
+}
+
 # --- Issue queue (GitHub label transitions) ----------------------------------------
 # The label lifecycle has exactly two writers: claim (READY -> WORKING, strict —
 # a failed claim must abort before any work starts) and release (WORKING -> the
@@ -1245,7 +1271,8 @@ Fix every one, and ONLY these. This is the scope of the run: a thread above, or 
 
 Keep $(gate_cmds_text) green in $TEST_DIR. Commit to branch $branch. Do NOT push — the loop pushes for you. Do NOT resolve the review threads — the reviewer verifies and resolves them next round." \
       >/dev/null || true
-    git push origin "$branch" >>"$ilog" 2>&1 || true
+    push_branch "$branch" "$n" "$ilog" || \
+      log "#$n: continuing with an unpublished fix — the next review reads a stale PR head"
   done
 
   # The last implementer round above is never reviewed inside the loop; give it

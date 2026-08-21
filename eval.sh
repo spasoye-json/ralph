@@ -306,6 +306,35 @@ PATH="$stubd:$PATH" GH_STUB_MARKER=0 approve_pr "https://example/pr/42" 7 /dev/n
 grep -q '^comment' "$GH_STUB_LOG" && ok || bad "approve_pr must post the marker when absent"
 rm -rf "$stubd"
 
+# --- 11b. the branch must never be silently unpublished --------------------------
+# A plain `git push || true` at three sites hid a rejected push. When a stage
+# rebased the branch the push was non-fast-forward, the PR head stayed behind, and
+# every later review round re-posted findings the local code had already fixed.
+printf '== push_branch (rejected push is never swallowed) ==\n'
+stubd="$(mktemp -d)"; : > "$stubd/calls"
+cat > "$stubd/git" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >> "$STUB_CALLS"
+case "$1 $2" in
+  "push origin")                 [ "${STUB_REJECT:-0}" = 1 ] && exit 1 || exit 0 ;;
+  "rev-parse refs/remotes/"*)    echo deadbeefcafe ;;
+  "push --force-with-lease"*)    [ "${STUB_FORCE_FAILS:-0}" = 1 ] && exit 1 || exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+chmod +x "$stubd/git"
+export STUB_CALLS="$stubd/calls"
+pb() { : > "$STUB_CALLS"; PATH="$stubd:$PATH" push_branch issue/7 7 /dev/null; }
+STUB_REJECT=0 pb && ok || bad "a clean push must succeed"
+grep -qv 'force-with-lease' "$STUB_CALLS" && ok || bad "a clean push must not force"
+STUB_REJECT=1 STUB_FORCE_FAILS=0 pb && ok || bad "a rejected push must be retried with --force-with-lease"
+grep -q 'force-with-lease' "$STUB_CALLS" && ok || bad "the retry must carry a lease, never a bare --force"
+STUB_REJECT=1 STUB_FORCE_FAILS=1 pb && bad "a branch that stayed unpublished must FAIL, not return 0" || ok
+unset STUB_CALLS; rm -rf "$stubd"
+grep -q 'push_branch' "$HERE/process-issue.sh"  && ok || bad "process-issue must publish through push_branch"
+! grep -q 'git push origin "$branch" >>"$ilog" 2>&1 || true' "$HERE/lib.sh" \
+  && ok || bad "no push site may swallow its failure with || true"
+
 # --- 12a. sandbox credential passthrough (offline, array-only) ---------------------
 # The writer sandbox must inherit the agent's credentials and endpoint BY NAME.
 # A value on the docker command line would land in the process table and in every
