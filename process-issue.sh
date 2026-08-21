@@ -93,6 +93,14 @@ run_impl_here() {
 Implement GitHub issue #$n. Work only within this worktree.
 The full issue is included below — work from it directly; do not call gh or fetch
 anything over the network.
+
+SCOPE. The issue's acceptance criteria are the whole job. Before you change a
+file, name the criterion that asks for it; if none does, do not change it. Work
+nobody asked for is a defect here, not a bonus: an independent verifier reads
+this diff against the ticket and fails it for anything out of scope, which sends
+you round again. If you find a real problem the ticket does not cover, say so in
+your final message and leave the code alone.
+
 Commit incrementally. You are DONE only when all tests pass and lint is clean.
 Do not stop early: if the work is merely hard, keep going until $(gate_cmds_text)
 pass in $TEST_DIR. This loop will re-run you with the exact failures until that
@@ -286,7 +294,9 @@ while ! verify_issue "$pr_url" "$n" "$ilog"; do
   [ "$brc" = 4 ] && stop_issue budget-exceeded 1 "wall-clock budget RALPH_ISSUE_BUDGET=${RALPH_ISSUE_BUDGET}s exceeded before the correctness gate passed — re-queued"
   [ "$brc" = 1 ] && stop_issue verify-fail 1 "attempt cap RALPH_MAX_ATTEMPTS=${RALPH_MAX_ATTEMPTS} reached before the correctness gate passed"
   log "#$n: correctness gap vs ticket — re-running implementer to satisfy issue #$n"
-  rebuild_or_stop "An independent reviewer judged the change does NOT fully satisfy issue #$n: a stated acceptance criterion or an edge case (boundaries, empty or missing input, error paths) is unmet. Re-read issue #$n and strengthen the implementation and its tests so every acceptance criterion and edge case is covered." verify-fail
+  rebuild_or_stop "An independent verifier judged this change against issue #$n and FAILED it, on correctness, on scope, or on both. Its words follow. Act on them exactly: close a correctness gap by strengthening the implementation and its tests, and remove out-of-scope work rather than justifying it. Change nothing else.
+
+$VERIFY_REASON" verify-fail
 done
 
 # --- 4. Review <-> resolve: retry until the review converges -----------------

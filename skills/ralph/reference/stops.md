@@ -59,6 +59,16 @@ the issue. The implementation and the acceptance criteria disagree; read both.
 the open review threads on the PR: a reviewer looping on the same thread means
 the finding is real and the fixer cannot see it.
 
+Read the round journal comments too, `ralph threads rounds <pr>` for the index
+and `gh pr view <pr> --comments` for the reasoning. They tell you which kind of
+non-convergence you have. A round that posts a fresh crop of findings in code it
+already passed means the memory is not reaching it: check that the journal
+comments are still on the PR, because a missing one costs the next round its
+fixed point and sends it back over the whole diff. A round that keeps re-raising
+something an earlier round accepted is a prompt bug, not a code problem. And a
+thread the fixer cannot close in three rounds usually needs an asset or a
+decision no agent has, which is a ticket to answer rather than a loop to rerun.
+
 **`conflict-unresolved`** - the rebase onto the base branch could not be
 resolved. Rebase it by hand.
 

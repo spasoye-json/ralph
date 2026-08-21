@@ -12,6 +12,13 @@
 #   count <pr>                         number of unresolved threads
 #   resolve <threadId>                 mark a thread resolved
 #   comment <pr> <path> <line> <body>  post an inline finding (creates a thread)
+#   history <pr>                       EVERY thread, resolved included, with its full
+#                                      reply chain — the reviewer's memory of what it
+#                                      already judged and what the fixer answered
+#   rounds <pr>                        recorded review rounds: "<round>\t<sha>", oldest
+#                                      first, parsed from the journal comments
+#   journal <pr> <round> <sha> <body>  post this round's reasoning as a PR comment,
+#                                      marker-prefixed so `rounds` can read it back
 
 set -euo pipefail
 
@@ -35,8 +42,50 @@ _list() {
         | "\(.id)\t\(.path // "?"):\(.line // "?")\t\((.comments.nodes[0].body // "") | gsub("[\r\n]+";" "))"'
 }
 
+# The journal marker. The reviewer's per-round reasoning is a PR comment whose
+# FIRST line is this marker plus the round number and the commit reviewed, so the
+# rounds are machine-readable from the PR alone. It must never start with
+# APPROVAL_MARKER, which classify_pr keys on.
+ROUND_MARKER="${RALPH_ROUND_MARKER:-<!-- ralph-round}"
+
+_history() {
+  gh api graphql -F owner="$OWNER" -F repo="$REPO" -F pr="$1" -f query='
+    query($owner:String!,$repo:String!,$pr:Int!){
+      repository(owner:$owner,name:$repo){
+        pullRequest(number:$pr){
+          reviewThreads(first:100){ nodes{
+            id isResolved path line
+            comments(first:20){ nodes{ author{login} body } }
+          }}
+        }}}' \
+    | jq -r '.data.repository.pullRequest.reviewThreads.nodes[]
+        | (if .isResolved then "RESOLVED" else "OPEN" end) as $st
+        | [$st, .id, "\(.path // "?"):\(.line // "?")",
+           ([.comments.nodes[] | "\(.author.login // "?"): \((.body // "") | gsub("[\r\n]+";" ") | .[0:600])"] | join("  ||  "))]
+        | @tsv'
+}
+
 case "$cmd" in
   list)    _list "${1:?pr}" ;;
+  history) _history "${1:?pr}" ;;
+  rounds)
+    # Oldest first, one "<round>\t<sha>" per journal comment. jq does the marker
+    # match, so a comment written by a human never parses as a round.
+    gh api graphql -F owner="$OWNER" -F repo="$REPO" -F pr="${1:?pr}" -f query='
+      query($owner:String!,$repo:String!,$pr:Int!){
+        repository(owner:$owner,name:$repo){
+          pullRequest(number:$pr){ comments(last:100){ nodes{ body } } }}}' \
+      | jq -r --arg mk "$ROUND_MARKER" '.data.repository.pullRequest.comments.nodes[]
+          | .body | split("\n")[0]
+          | select(startswith($mk))
+          | capture("(?<round>[0-9]+)\\s+(?<sha>[0-9a-f]{7,40})")
+          | [.round, .sha] | @tsv'
+    ;;
+  journal)
+    pr="${1:?pr}"; round="${2:?round}"; sha="${3:?sha}"; body="${4:?body}"
+    gh pr comment "$pr" --body "$(printf '%s: %s %s -->\n\n%s' "$ROUND_MARKER" "$round" "$sha" "$body")" >/dev/null
+    echo "journalled round $round at $sha"
+    ;;
   count)
     # Capture first so an API failure exits non-zero (the caller assumes 1
     # unresolved thread) instead of the pipeline masking it as a "0" count.

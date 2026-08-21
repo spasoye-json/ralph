@@ -42,6 +42,15 @@ can be: the lint+test gate is run by the orchestrator, not claimed by the
 agent, and review approval is the count of unresolved GitHub review threads
 reaching zero, not a parsed keyword.
 
+Fresh does not mean amnesiac. The reviewer is one identity across rounds, and
+**its memory is the PR**: the threads with their reply chains, and a journal
+comment per round carrying what it resolved, what it posted, and what it judged
+and chose not to post. Ralph stores no review state of its own. Without that
+memory every round re-read the whole diff with fresh eyes and posted a fresh
+crop of findings, so the loop diverged instead of converging. Role separation is
+untouched — the reviewer still sees only what the implementer's work left on the
+PR, never its reasoning.
+
 ## What it does, per issue
 
 1. `/implement` implements the issue in its own worktree and context (no turn
@@ -60,16 +69,25 @@ reaching zero, not a parsed keyword.
 3. An agent opens a **draft** PR up front, authoring a Conventional-Commit
    title and a body in the repo's house style (`## What / Changes / Acceptance
    criteria / Testing`, ending in `Closes #N`). It stays draft until approved.
-4. `/code-review` reviews the **open PR** in a **fresh session** (fixed point
-   `origin/<base>`, spec = the issue) and posts each finding as an **inline
-   review thread**, resolving the ones it judges genuinely fixed. The verdict
-   is the count of **unresolved review threads** (`ralph/threads.sh`): 0 means
-   approved.
+4. `/code-review` reviews the **open PR** in a **fresh session** (spec = the
+   issue) and posts each finding as an **inline review thread**, resolving the
+   ones it judges genuinely fixed. The verdict is the count of **unresolved
+   review threads** (`ralph/threads.sh`): 0 means approved. **Round 1** reviews
+   the whole diff against `origin/<base>`. A **later round** first checks the
+   open threads against the new commits and resolves what the code genuinely
+   fixed, then reviews only what changed since the round before it, which it
+   reads off its own journal comment. It may not re-open what an earlier round
+   already judged unless that code changed, and it ends by journalling the round
+   (`threads.sh journal`). The whole diff is still covered once more at the end,
+   by the final verification review and the correctness verifier.
 5. While threads remain unresolved, a **new agent** (fresh session) reads
-   them, resolves them, and pushes. Between PR-open and review, an independent
-   read-only **correctness verifier** judges the diff against the issue's
-   acceptance criteria and edge cases; in AFK mode a fail re-runs the
-   implementer until it passes (never a handback).
+   them, fixes **only** them, and pushes. Between PR-open and review, an
+   independent read-only **correctness verifier** judges the diff against the
+   issue's acceptance criteria and edge cases, and on a **second axis, scope**:
+   work no acceptance criterion asks for fails the change, path by path, because
+   an unasked-for diff costs everyone another review round. Its own words are fed
+   to the implementer verbatim as the next attempt's instructions. In AFK mode a
+   fail re-runs the implementer until it passes (never a handback).
 6. Steps 4 and 5 repeat until zero unresolved threads. Approval requires the
    reviewer process to **exit cleanly *and* report zero unresolved threads**;
    a crashed or timed-out reviewer never counts as an approval. Even with
@@ -359,7 +377,7 @@ skills/ralph/               the /ralph skill: operating the loop, reading a stop
 run.sh                      ← the continuous loop you start and Ctrl-C to stop
 process-issue.sh            one issue, end to end (implement → PR → review)
 resolve-conflicts.sh        rebase a PR onto the base, resolve, re-review
-threads.sh                  count unresolved review threads (the verdict)
+threads.sh                  review threads: the verdict, the history, the journal
 status.sh                   live snapshot: queue, open PRs, throughput
 eval.sh                     offline regression gate for the learning/guard logic
 eval-agents.sh              OPT-IN agent-output quality harness (real /implement, no GitHub writes)
@@ -496,6 +514,10 @@ always-run offline `eval.sh` or CI, because it spends real tokens.
   computed by `ralph/threads.sh`; there is no parsed keyword. The reviewer is
   expected to post each finding as an inline review thread and resolve the
   ones it fixes.
+- The PR is the reviewer's **only** memory, so it must stay readable: the
+  threads, their reply chains, and one journal comment per round. Deleting a
+  journal comment costs the next round its fixed point, and it falls back to
+  reviewing the whole diff again.
 - The merge is **yours**: Ralph never merges and never enables auto-merge. An
   approved PR is un-drafted and waits for you; the base branch's required
   lint+test CI check (the check name is yours to define in branch protection)

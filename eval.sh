@@ -306,6 +306,38 @@ PATH="$stubd:$PATH" GH_STUB_MARKER=0 approve_pr "https://example/pr/42" 7 /dev/n
 grep -q '^comment' "$GH_STUB_LOG" && ok || bad "approve_pr must post the marker when absent"
 rm -rf "$stubd"
 
+# --- 12b. review rounds: the reviewer's memory lives on the PR ---------------------
+# next_round/last_round_sha decide which round a pass claims and which commit it
+# diffs against. Getting either wrong un-does the convergence property: a repeated
+# round number, or an empty fixed point, sends the reviewer back over the whole
+# diff with fresh eyes — the failure this replaced.
+printf '== review rounds (next_round, last_round_sha) ==\n'
+r2="$(printf '1\t81aaaba\n2\t82b533ac\n')"
+[ "$(next_round "")" = 1 ]                    && ok || bad "no rounds recorded -> round 1"
+[ -z "$(last_round_sha "")" ]                 && ok || bad "no rounds recorded -> no fixed point"
+[ "$(next_round "$r2")" = 3 ]                 && ok || bad "two rounds -> round 3"
+[ "$(last_round_sha "$r2")" = 82b533ac ]      && ok || bad "fixed point is the highest round's sha"
+# Highest+1, not count+1: a dropped or duplicated journal comment must never let
+# two passes claim the same round.
+[ "$(next_round "$(printf '1\taaaaaaa\n3\tccccccc\n')")" = 4 ]      && ok || bad "gap in the rounds -> highest+1"
+[ "$(last_round_sha "$(printf '3\tccccccc\n1\taaaaaaa\n')")" = ccccccc ] && ok || bad "out-of-order rounds -> highest wins"
+[ "$(next_round "$(printf '2\tbbbbbbb\n2\tbbbbbbb\n')")" = 3 ]      && ok || bad "duplicated round -> highest+1"
+[ "$(next_round "$(printf 'garbage line\n')")" = 1 ]                   && ok || bad "unparseable input -> round 1"
+
+printf '== reviewer memory + scope guardrail (prompts) ==\n'
+lib="$HERE/lib.sh"; pi="$HERE/process-issue.sh"; ts="$HERE/threads.sh"
+grep -q 'history) _history' "$ts"                    && ok || bad "threads.sh must expose the full thread history"
+grep -q 'journal)' "$ts"                             && ok || bad "threads.sh must expose the round journal"
+grep -q 'rounds)' "$ts"                              && ok || bad "threads.sh must expose the recorded rounds"
+grep -q 'hist="\$("\$threads_sh" history' "$lib"     && ok || bad "review_pass must read the thread history"
+grep -q 'rounds="\$("\$threads_sh" rounds' "$lib"    && ok || bad "review_pass must read its earlier rounds"
+grep -q 'git diff \$prev_sha\.\.\.HEAD' "$lib"        && ok || bad "a later round must diff from the previous round's commit"
+grep -q 'journal \$pr_num \$round \$head_sha' "$lib"  && ok || bad "a review pass must journal the round it just ran"
+grep -q 'VERIFY_REASON' "$lib"                       && ok || bad "the verifier must hand its reasons back"
+grep -q 'VERIFY_REASON' "$pi"                        && ok || bad "the rebuild prompt must carry the verifier's reasons"
+grep -q 'name the criterion that asks for it' "$pi"  && ok || bad "the implement prompt must carry the scope rule"
+grep -q 'Judge SCOPE as the second axis' "$lib"      && ok || bad "the verifier must judge scope"
+
 # --- 13. resume an issue whose PR is already open (stubbed gh + source) ------------
 # Pins the regression: a hand-run `ralph process-issue N` used to gate the
 # open-PR check on a LOCAL refs/heads/issue/N, which cleanup() deletes on every

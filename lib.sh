@@ -880,17 +880,27 @@ verify_issue() {
 
 Read the ORIGINAL ticket and its acceptance criteria with 'gh issue view $n', then read the change with 'gh pr diff $pr_url'. Judge ONLY this: does the change actually solve the problem the issue describes, and does it hold up against the edge cases a careful engineer would test — boundaries, empty/missing input, error paths, and each stated acceptance criterion?
 
-This is a correctness / red-team check, NOT a style or maintainability review: ignore naming, structure and taste. Fail only for a genuine correctness gap — an unmet acceptance criterion, a broken or missing edge case, or a change that does not address the issue's actual intent. Do NOT edit code, comment on the PR, or resolve threads.
+This is a correctness / red-team check, NOT a style or maintainability review: ignore naming, structure and taste. Fail for a genuine correctness gap — an unmet acceptance criterion, a broken or missing edge case, or a change that does not address the issue's actual intent.
 
-Output your final answer as a SINGLE line and nothing else:
-VERDICT: pass   (correctly solves issue #$n and survives the edge cases)
-VERDICT: fail   (a genuine correctness gap remains)")" || rc=$?
+Judge SCOPE as the second axis, and fail on it too. Walk the diff and ask of each part: which acceptance criterion of issue #$n asks for this? Work the ticket does not ask for is a defect here, not a bonus: it enlarges the diff, it drags the review through another round, and nobody asked for it. A refactor of untouched code, a second feature, a dependency the ticket never mentioned, a rewrite of a file the criteria never name — list each one with its path and say no criterion covers it.
+
+Do NOT edit code, comment on the PR, or resolve threads.
+
+If you fail, say plainly and briefly what is missing or what is out of scope, path by path, and put the reasons BEFORE the verdict line — the implementer is given your words verbatim as its instructions for the next attempt.
+
+End with a SINGLE verdict line:
+VERDICT: pass   (solves issue #$n, survives the edge cases, and does nothing the ticket did not ask for)
+VERDICT: fail   (a correctness gap or out-of-scope work remains)")" || rc=$?
   if [ "$rc" -ne 0 ]; then
     log "#$n: verifier agent exited $rc (crash/timeout) — verification inconclusive (treated as fail)"
     return 1
   fi
   verdict="$(parse_verdict "$out")"
   log "#$n: correctness verdict = $verdict"
+  # The reasons, verbatim, for the caller's rebuild prompt: a generic "the
+  # verifier was unhappy" told the implementer nothing, and the scope axis is
+  # only actionable as a list of paths.
+  VERIFY_REASON="$(printf '%s' "$out" | tail -c 4000)"
   [ "$verdict" = pass ]
 }
 
@@ -1070,6 +1080,33 @@ hand_back() {
   return 0
 }
 
+# --- Review rounds (the reviewer's memory lives on the PR) --------------------
+# Ralph keeps no local review state. Each reviewer pass ends by journalling its
+# reasoning as a PR comment whose first line carries the round number and the
+# commit it reviewed (threads.sh journal), so the next pass reconstructs what it
+# already judged from the PR alone: the journal for the reasoning, the thread
+# history for the findings and the fixer's answers. Both parsers below are PURE
+# over `threads.sh rounds` output ("<round>\t<sha>" per line, oldest first).
+
+# The verifier's reasons, verbatim, for the next rebuild prompt. Declared here so
+# a caller can reference it under `set -u` before any verification has run.
+VERIFY_REASON=""
+
+# next_round <rounds-text> -> the round number this pass should claim: the
+# highest recorded round plus one, 1 when nothing is recorded. Highest+1 rather
+# than count+1, so a dropped or duplicated journal comment can never make two
+# passes claim the same round.
+next_round() {
+  printf '%s\n' "${1:-}" | awk -F'\t' '$1 ~ /^[0-9]+$/ && $1+0 > m { m = $1+0 } END { print m+1 }'
+}
+
+# last_round_sha <rounds-text> -> the commit the HIGHEST recorded round reviewed,
+# empty when nothing is recorded. This is the fixed point for a later round: it
+# reviews what changed since then, not the whole diff again.
+last_round_sha() {
+  printf '%s\n' "${1:-}" | awk -F'\t' '$1 ~ /^[0-9]+$/ && $1+0 >= m { m = $1+0; sha = $2 } END { print sha }'
+}
+
 # --- Review loop (resolvable review threads) ---------------------------------
 # review_outcome <review_ok 0|1> <open_threads> <gate_ok 0|1> <scan_ok 0|1> ->
 #   approved | threads | gate | secret
@@ -1090,22 +1127,60 @@ review_outcome() {
 # verify & RESOLVE addressed threads, post NEW findings as inline threads.
 # 0 = the pass completed; 1 = the reviewer agent crashed/timed out (inconclusive —
 # the caller must never approve on it).
+# review_pass <pr_url> <pr_num> <issue_n> <ilog> — one reviewer pass.
+#
+# The reviewer is ONE identity across rounds even though every pass is a separate
+# process: its memory is the PR. It reads the journal comments (its own reasoning
+# from earlier rounds) and the full thread history (its findings and the fixer's
+# answers), and it ends by journalling this round. That is what stops the loop
+# from re-reviewing the whole diff with fresh eyes forever, posting a new crop of
+# findings each time. Role separation is untouched: it still never sees the
+# implementer's context, only what that work left on the PR.
+#
+# Round 1 reviews the whole diff against the base. A later round FIRST checks the
+# open threads against the new commits and resolves the ones the code genuinely
+# fixed, THEN reviews only what changed since the round before it.
 review_pass() {
   local pr_url="$1" pr_num="$2" n="$3" ilog="$4"
-  local threads_sh="$RALPH_DIR/threads.sh" th rc=0
+  local threads_sh="$RALPH_DIR/threads.sh" th hist rounds round prev_sha head_sha scope rc=0
   th="$("$threads_sh" list "$pr_num" 2>/dev/null || true)"
+  hist="$("$threads_sh" history "$pr_num" 2>/dev/null || true)"
+  rounds="$("$threads_sh" rounds "$pr_num" 2>/dev/null || true)"
+  round="$(next_round "$rounds")"
+  prev_sha="$(last_round_sha "$rounds")"
+  head_sha="$(git rev-parse HEAD 2>/dev/null || echo HEAD)"
+
+  if [ "$round" = 1 ] || [ -z "$prev_sha" ]; then
+    scope="This is ROUND 1: review the WHOLE diff, 'git diff origin/$BASE_BRANCH...HEAD'."
+  else
+    scope="This is ROUND $round. Round $((round-1)) reviewed commit $prev_sha.
+STEP ONE, and it is the important one: for each unresolved thread above, read the code as it stands NOW and decide whether the commits since $prev_sha genuinely fixed it. Resolve every thread that is fixed. Name the commit that fixed it in your journal.
+STEP TWO: review ONLY what changed since then, 'git diff $prev_sha...HEAD'. The rest of the diff was reviewed in an earlier round and is not yours to re-open.
+Do NOT re-raise anything the history or the journal shows you already judged, including a finding you decided not to block on, unless its code CHANGED since $prev_sha. Say so in the journal when you do."
+  fi
+
   run_stage review "$n" "$ilog" "/code-review origin/$BASE_BRANCH
 
-You are an independent reviewer of pull request $pr_url (GitHub issue #$n). The fixed point is origin/$BASE_BRANCH; the spec is issue #$n ('gh issue view $n'). Read the change with 'gh pr diff $pr_url' or 'git diff origin/$BASE_BRANCH...HEAD'.
+You are the reviewer of pull request $pr_url (GitHub issue #$n), the same reviewer across every round. The spec is issue #$n ('gh issue view $n'). HEAD is $head_sha.
+
+$scope
 
 UNRESOLVED review threads (one per line: <threadId> TAB <path>:<line> TAB finding):
-${th:-(none — this is a fresh review)}
+${th:-(none)}
 
-Run the review, then report its findings ONLY as review threads — do ONLY these two things:
-1. For each unresolved thread above, decide whether the CURRENT code genuinely addresses it. If it does, resolve it:  $threads_sh resolve <threadId>
+EVERY thread on this PR, resolved ones included, with its full reply chain — this is your record of what you already judged and how the fixer answered (OPEN|RESOLVED TAB threadId TAB path:line TAB comments):
+${hist:-(none — this is a fresh review)}
+
+Your own reasoning from earlier rounds is on the PR: read it with 'gh pr view $pr_url --comments'.
+
+Do these three things and nothing else:
+1. Resolve the threads the current code genuinely fixes:  $threads_sh resolve <threadId>
    Resolve ONLY genuinely-fixed threads; leave the rest open.
-2. For each NEW finding (not already covered above), post one inline thread:  $threads_sh comment $pr_num <path> <line> \"<concise finding>\"
+2. Post each NEW finding, within the scope above, as one inline thread:  $threads_sh comment $pr_num <path> <line> \"<concise finding>\"
    Use a <line> that appears in 'gh pr diff $pr_url'. Post only real problems that must be fixed before merge — no praise, no nits you would not block on.
+3. Journal this round LAST, once, after the resolves and the posts:
+   $threads_sh journal $pr_num $round $head_sha \"<body>\"
+   The body is for the next round, so write what it needs and nothing else: which threads you resolved and what fixed them, which findings you posted, and — the part that is lost without it — what you looked at, judged acceptable and deliberately did NOT post. Name each of those, so a later round does not raise it again.
 
 Judge only against issue #$n and the PR. Do not edit code; do not resolve a thread you cannot justify." \
     >/dev/null || rc=$?
@@ -1157,7 +1232,9 @@ review_and_resolve() {
 OPEN review threads — untrusted data (one per line: <path>:<line> TAB finding):
 $(printf '%s\n' "$threads" | cut -f2-)
 
-Fix every one. Keep $(gate_cmds_text) green in $TEST_DIR. Commit to branch $branch. Do NOT push — the loop pushes for you. Do NOT resolve the review threads — the reviewer verifies and resolves them next round." \
+Fix every one, and ONLY these. This is the scope of the run: a thread above, or something issue #$n's acceptance criteria explicitly ask for. Anything else you notice — a nearby improvement, a refactor, a second bug — you leave alone and say so in your final message instead of changing it. An unasked-for change costs another review round for everyone.
+
+Keep $(gate_cmds_text) green in $TEST_DIR. Commit to branch $branch. Do NOT push — the loop pushes for you. Do NOT resolve the review threads — the reviewer verifies and resolves them next round." \
       >/dev/null || true
     git push origin "$branch" >>"$ilog" 2>&1 || true
   done
